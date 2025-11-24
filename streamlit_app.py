@@ -33,7 +33,7 @@ st.caption("Restricted MOTUS data is NOT stored anywhere. You upload privately e
 # =====================================================
 # SIDEBAR UPLOAD (ONLY)
 # =====================================================
-st.sidebar.header(" Private Data Upload (Restricted)")
+st.sidebar.header("🔒 Private Data Upload (Restricted)")
 
 xlsx_up = st.sidebar.file_uploader(
     "Upload SawWhets detections Excel (.xlsx)",
@@ -426,9 +426,9 @@ with tab3:
 with tab4:
     st.header("Final Summary (simple view)")
 
-    st.write(f" Total owls analyzed: **{owl_df['motusTagID'].nunique()}**")
-    st.write(f" Best regression model: **{best_reg_name}**")
-    st.write(f" Best classification model: **{best_cls_name}**")
+    st.write(f"Total owls analyzed: **{owl_df['motusTagID'].nunique()}**")
+    st.write(f"Best regression model: **{best_reg_name}**")
+    st.write(f"Best classification model: **{best_cls_name}**")
 
     st.subheader("Residency distribution")
     st.bar_chart(owl_df["ResidencyType_true"].value_counts())
