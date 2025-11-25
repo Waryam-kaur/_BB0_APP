@@ -41,11 +41,6 @@ upload_mode = st.sidebar.radio(
     ["Private Manual Upload", "Local/Drive Path"]
 )
 
-short_thr = st.sidebar.slider("Short stay threshold (days)", 0.0, 10.0, 3.0, 0.5)
-long_thr = st.sidebar.slider("Long stay threshold (days)", 3.0, 30.0, 7.0, 0.5)
-
-st.sidebar.caption("Use the same [0–3, 3–7, 7+] bins as notebook (defaults already set).")
-
 combined_csv = None
 old_meta_file = None
 
