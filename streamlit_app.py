@@ -1,365 +1,287 @@
+# streamlit_app.py
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 import warnings
 
-from sklearn.model_selection import train_test_split, RandomizedSearchCV
+from sklearn.model_selection import train_test_split, StratifiedKFold, RandomizedSearchCV
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import (
-    r2_score, mean_squared_error,
-    classification_report, confusion_matrix,
-    accuracy_score, f1_score
+    r2_score,
+    mean_squared_error,
+    classification_report,
+    confusion_matrix,
+    accuracy_score,
+    f1_score,
 )
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.ensemble import (
-    RandomForestRegressor, GradientBoostingRegressor,
-    RandomForestClassifier, GradientBoostingClassifier
+    RandomForestRegressor,
+    GradientBoostingRegressor,
+    RandomForestClassifier,
+    GradientBoostingClassifier,
 )
 from sklearn.svm import SVR, SVC
 from sklearn.inspection import permutation_importance
 
 warnings.filterwarnings("ignore")
 
-# =========================
-# Page config
-# =========================
+# -------------------------------------------------------------------
+# Global residency thresholds (NO sliders anymore)
+# -------------------------------------------------------------------
+SHORT_THR = 3.0   # 0–3 days -> Vagrant
+LONG_THR = 7.0    # 3–7 days -> Migrant ; 7+ -> Resident
+
+# -------------------------------------------------------------------
+# Streamlit page config
+# -------------------------------------------------------------------
 st.set_page_config(page_title="BBO Owl Migration App", layout="wide")
 st.title("🦉 BBO Owl Migration App (EDA + FE + Modeling + XAI)")
 
+# -------------------------------------------------------------------
+# Helper EDA functions (from your EDA notebook)
+# -------------------------------------------------------------------
+def plot_detections_per_owl(df_det):
+    st.subheader("1. Detections per Owl (motusTagID)")
+    if "motusTagID" not in df_det.columns:
+        st.warning("`motusTagID` column not found in detection data.")
+        return
 
-# =========================
-# Sidebar controls
-# =========================
-st.sidebar.header("1) Upload data")
+    counts = df_det["motusTagID"].value_counts().sort_values(ascending=False)
 
-upload_mode = st.sidebar.radio(
-    "Upload method",
-    ["Private Manual Upload", "Local/Drive Path"]
-)
+    fig, ax = plt.subplots(figsize=(12, 4))
+    counts.plot(kind="bar", ax=ax)
+    ax.set_title("Detections per Owl (motusTagID)")
+    ax.set_xlabel("motusTagID")
+    ax.set_ylabel("Count")
+    plt.xticks(rotation=45, ha="right")
+    st.pyplot(fig)
 
-st.sidebar.caption(
-    "Residency thresholds are fixed to 0–3 days (Vagrant), "
-    "3–7 days (Migrant), 7+ days (Resident), same as the notebook."
-)
 
-combined_csv = None
-old_meta_file = None
+def cap_outliers_iqr(df, col):
+    """IQR-based capping exactly like your notebook."""
+    Q1 = df[col].quantile(0.25)
+    Q3 = df[col].quantile(0.75)
+    IQR = Q3 - Q1
+    lower_cap = Q1 - 1.5 * IQR
+    upper_cap = Q3 + 1.5 * IQR
+    return df[col].clip(lower=lower_cap, upper=upper_cap)
 
-if upload_mode == "Private Manual Upload":
-    combined_csv = st.sidebar.file_uploader(
-        "FINAL combined dataset (combined_sawwhet_owls.csv)",
-        type=["csv"]
+
+def plot_before_after_boxplots(df_det):
+    st.subheader("2. Outlier Capping (Before vs After)")
+
+    # numeric signal columns used in the notebook
+    signal_cols = ["snr", "sig", "sigsd", "noise", "freq", "freqsd", "burstSlop", "slop"]
+    cols_present = [c for c in signal_cols if c in df_det.columns]
+
+    if not cols_present:
+        st.warning("No numeric signal columns found for outlier capping plots.")
+        return
+
+    # To keep it readable, just show for snr and sig if they exist, else first two
+    if "snr" in cols_present and "sig" in cols_present:
+        cols_to_show = ["snr", "sig"]
+    else:
+        cols_to_show = cols_present[:2]
+
+    df_capped = df_det.copy()
+    for c in cols_present:
+        df_capped[c] = cap_outliers_iqr(df_capped, c)
+
+    for col in cols_to_show:
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+        sns.boxplot(x=df_det[col], ax=axes[0])
+        axes[0].set_title(f"Before Capping: {col}")
+        sns.boxplot(x=df_capped[col], ax=axes[1])
+        axes[1].set_title(f"After Capping: {col}")
+        plt.tight_layout()
+        st.pyplot(fig)
+
+
+def plot_signal_corr_heatmap(df_det):
+    st.subheader("3. Correlation Heatmap (Numeric Signal Features)")
+
+    signal_cols = ["snr", "sig", "sigsd", "noise", "freq", "freqsd", "burstSlop", "slop"]
+    cols_present = [c for c in signal_cols if c in df_det.columns]
+
+    if len(cols_present) < 2:
+        st.warning("Not enough numeric signal features for a correlation heatmap.")
+        return
+
+    corr = df_det[cols_present].corr()
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sns.heatmap(corr, annot=True, cmap="coolwarm", ax=ax)
+    ax.set_title("Correlation Heatmap (Numeric Signal Features)")
+    st.pyplot(fig)
+
+
+def eda_summary_text():
+    st.subheader("4. EDA & Feature Engineering Summary (From Notebook)")
+    st.markdown(
+        """
+We started with a multi-sheet MOTUS dataset containing raw owl detections from 42 receiver stations.  
+Each sheet corresponded to one Northern Saw-whet Owl, except sheet **80830**, which contained detections
+from **two** different owls (80830 and 80831). We identified this by checking the unique `motusTagID`
+values inside each sheet and then manually split that sheet into two clean subsets.
+
+All sheets were concatenated into a single detection-level dataframe. Pandas automatically aligned
+shared columns and filled missing columns with `NaN` where a sheet did not have a field.
+
+We cleaned the timestamp fields by converting `DATE` and `TIME` into a unified **`DATETIME`** column.
+From this, we later derived features such as **hour of day** and daily detection counts.  
+Next, we handled structural missing values and performed **IQR-based capping (winsorizing)** for
+signal-based numeric columns (e.g., `snr`, `sig`, `noise`) to reduce extreme spikes without destroying
+biological variation.
+
+Finally, we used a correlation heatmap to drop highly correlated features and merged the cleaned
+new MOTUS detections with the old metadata file (age, sex, species, measurements) via `motusTagID`.
+This produced a fully enriched dataset that was ready for modelling.
+        """
     )
-    old_meta_file = st.sidebar.file_uploader(
-        "OLD metadata (clean_df_selected.csv)",
-        type=["csv"]
-    )
-else:
-    comb_path = st.sidebar.text_input("combined_sawwhet_owls.csv path", "")
-    old_path = st.sidebar.text_input("clean_df_selected.csv path", "")
-    combined_csv = comb_path if comb_path else None
-    old_meta_file = old_path if old_path else None
 
 
-# =========================
-# Helper functions
-# =========================
+# -------------------------------------------------------------------
+# Main Modelling / FE helper
+# -------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def load_csv(csv_or_path):
-    return pd.read_csv(csv_or_path, low_memory=False)
+def load_csv_from_upload(uploaded):
+    if uploaded is None:
+        return None
+    return pd.read_csv(uploaded, low_memory=False)
 
 
-def safe_split(X, y, task="reg"):
-    """Train-test split with safety for tiny datasets / imbalanced classes."""
-    n = len(X)
-    if n < 5:
-        st.error(f"Not enough owls to split/train (rows={n}). Adjust thresholds/filters.")
-        st.stop()
+def prepare_model_data(df_new, df_old):
+    """Replicates your modelling notebook steps, returns many useful objects."""
 
-    stratify_arg = None
-    if task == "cls":
-        counts = pd.Series(y).value_counts()
-        if counts.shape[0] >= 2 and counts.min() >= 2:
-            stratify_arg = y
+    df = df_new.copy()
+
+    # 1) Standardize motusTagID column
+    possible_id_cols = [c for c in df.columns if "motus" in c.lower() and "tag" in c.lower()]
+    possible_id_cols += [c for c in df.columns if c.lower() in ["tag_id", "tagid", "motustagid_sheet"]]
+    if not possible_id_cols:
+        raise ValueError("Could not find a motus tag ID column in the NEW detections file.")
+    id_col = possible_id_cols[0]
+    if id_col != "motusTagID":
+        df.rename(columns={id_col: "motusTagID"}, inplace=True)
+
+    df["motusTagID"] = pd.to_numeric(df["motusTagID"], errors="coerce")
+
+    # 2) Build DATETIME
+    df = df.copy()
+    if "DATETIME" in df.columns:
+        df["DATETIME"] = pd.to_datetime(df["DATETIME"], errors="coerce")
+    else:
+        if "DATE" in df.columns:
+            df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
         else:
-            st.warning("Too few samples per class → splitting without stratify.")
-            stratify_arg = None
+            df["DATE"] = pd.NaT
 
-    return train_test_split(X, y, test_size=0.2, random_state=42, stratify=stratify_arg)
+        if "TIME" in df.columns:
+            df["TIME_clean"] = df["TIME"].astype(str).str.extract(r"(\d{1,2}:\d{2}:\d{2})")[0]
+            df["TIME_clean"] = pd.to_timedelta(df["TIME_clean"], errors="coerce")
+        else:
+            df["TIME_clean"] = pd.to_timedelta(np.nan)
 
+        df["DATETIME"] = df["DATE"] + df["TIME_clean"]
 
-# =========================
-# Load datasets
-# =========================
-if combined_csv is None or old_meta_file is None:
-    st.info("Upload BOTH combined_sawwhet_owls.csv and clean_df_selected.csv to continue.")
-    st.stop()
+    # hour-of-day feature for later EDA
+    df["hour"] = df["DATETIME"].dt.hour
 
-with st.spinner("Loading combined dataset..."):
-    df = load_csv(combined_csv)
+    # 3) True stay duration (days) per owl
+    first_det = df.groupby("motusTagID")["DATETIME"].min()
+    last_det = df.groupby("motusTagID")["DATETIME"].max()
 
-with st.spinner("Loading old metadata..."):
-    df_old = load_csv(old_meta_file)
+    stay_true = (last_det - first_det).dt.total_seconds() / (3600 * 24)
+    stay_true = stay_true.clip(lower=0)
+    stay_true = stay_true.reset_index()
+    stay_true.columns = ["motusTagID", "stay_duration_days"]
 
-# ============================================================
-# STEP 3 – Identify and Standardize the Motus Tag ID Column
-# ============================================================
-df = df.copy()
-df.columns = [c.strip() for c in df.columns]
+    # 4) Aggregated owl features
+    def safe_mean(s):
+        return pd.to_numeric(s, errors="coerce").mean()
 
-possible_id_cols = [c for c in df.columns if "motus" in c.lower() and "tag" in c.lower()]
-possible_id_cols += [c for c in df.columns if c.lower() in ["tag_id", "tagid", "motustagid_sheet"]]
+    def safe_std(s):
+        return pd.to_numeric(s, errors="coerce").std()
 
-if not possible_id_cols:
-    st.error(
-        "Could not find a Motus Tag ID column in combined_sawwhet_owls.csv.\n\n"
-        f"Columns found: {list(df.columns)}"
+    numeric_candidates = [
+        "snr",
+        "sig",
+        "sigsd",
+        "noise",
+        "freq",
+        "freqsd",
+        "slop",
+        "burstSlop",
+        "antBearing",
+        "port",
+        "nodeNum",
+        "runLen",
+        "hour",
+    ]
+    num_cols = [c for c in numeric_candidates if c in df.columns]
+
+    agg_dict = {"detections_count": ("motusTagID", "size")}
+    for c in num_cols:
+        agg_dict[f"{c}_mean"] = (c, safe_mean)
+        agg_dict[f"{c}_std"] = (c, safe_std)
+
+    owl_features = df.groupby("motusTagID").agg(**agg_dict).reset_index()
+
+    # 5) Old metadata (one row per owl)
+    df_old_local = df_old.copy()
+
+    old_id_candidates = [
+        c
+        for c in df_old_local.columns
+        if ("motus" in c.lower() and "tag" in c.lower()) or c.lower() in ["tag_id", "tagid", "motustagid_sheet"]
+    ]
+    if not old_id_candidates:
+        raise ValueError("Could not find a motus tag ID column in the OLD metadata file.")
+    old_id_col = old_id_candidates[0]
+
+    if old_id_col != "motusTagID":
+        df_old_local.rename(columns={old_id_col: "motusTagID"}, inplace=True)
+
+    df_old_local["motusTagID"] = pd.to_numeric(df_old_local["motusTagID"], errors="coerce")
+
+    # ONE metadata row per owl (first)
+    meta_one = df_old_local.groupby("motusTagID").first().reset_index()
+
+    # 6) Merge features + stay duration + metadata
+    owl_df = owl_features.merge(stay_true, on="motusTagID", how="left")
+    owl_df = owl_df.merge(meta_one, on="motusTagID", how="left", suffixes=("", "_meta"))
+
+    # 7) Residency type from thresholds
+    bins = [0, SHORT_THR, LONG_THR, np.inf]
+    labels = ["Vagrant", "Migrant", "Resident"]
+    owl_df["ResidencyType_true"] = pd.cut(
+        owl_df["stay_duration_days"], bins=bins, labels=labels, include_lowest=True
     )
-    st.stop()
 
-id_col = possible_id_cols[0]
-df.rename(columns={id_col: "motusTagID"}, inplace=True)
-df["motusTagID"] = pd.to_numeric(df["motusTagID"], errors="coerce")
-
-st.write("🔎 Possible ID cols in NEW detections:", possible_id_cols)
-st.write("Unique owls in NEW detections:", df["motusTagID"].nunique())
-
-# ============================================================
-# STEP 3 – Cleaning and Building a Valid DATETIME Column
-# ============================================================
-if "DATETIME" in df.columns:
-    df["DATETIME"] = pd.to_datetime(df["DATETIME"], errors="coerce")
-else:
-    if "DATE" in df.columns:
-        df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
-    else:
-        df["DATE"] = pd.NaT
-
-    if "TIME" in df.columns:
-        df["TIME_clean"] = df["TIME"].astype(str).str.extract(r"(\d{1,2}:\d{2}:\d{2})")[0]
-        df["TIME_clean"] = pd.to_timedelta(df["TIME_clean"], errors="coerce")
-    else:
-        df["TIME_clean"] = pd.to_timedelta(np.nan)
-
-    df["DATETIME"] = df["DATE"] + df["TIME_clean"]
-
-# hour + date_only for visualizations
-df["hour"] = df["DATETIME"].dt.hour
-df["date_only"] = df["DATETIME"].dt.date
-
-valid_dt = df["DATETIME"].notna().sum()
-st.write("Valid DATETIME rows:", valid_dt)
-
-# ============================================================
-# STEP 4 – Compute True Stay Duration From RAW Detection Timestamps
-# ============================================================
-first_det = df.groupby("motusTagID")["DATETIME"].min()
-last_det = df.groupby("motusTagID")["DATETIME"].max()
-
-stay_true = (last_det - first_det).dt.total_seconds() / (3600 * 24)
-stay_true = stay_true.clip(lower=0)
-stay_true = stay_true.reset_index()
-stay_true.columns = ["motusTagID", "stay_duration_days"]
-
-st.write("True stay durations computed for owls:", stay_true.shape[0])
-st.dataframe(stay_true.head())
-
-# ============================================================
-# STEP 5 – Aggregating Owl-Level Features
-# ============================================================
-def safe_mean(s):
-    return pd.to_numeric(s, errors="coerce").mean()
-
-
-def safe_std(s):
-    return pd.to_numeric(s, errors="coerce").std()
-
-
-num_cols = [
-    "snr", "sigsd", "freq", "freqsd", "slop", "burstSlop",
-    "antBearing", "port", "nodeNum", "runLen", "hour"
-]
-num_cols = [c for c in num_cols if c in df.columns]
-
-agg_dict = {"detections_count": ("motusTagID", "size")}
-for c in num_cols:
-    agg_dict[f"{c}_mean"] = (c, safe_mean)
-    agg_dict[f"{c}_std"] = (c, safe_std)
-
-owl_features = df.groupby("motusTagID").agg(**agg_dict).reset_index()
-
-st.write("Owl-level feature table shape:", owl_features.shape)
-st.dataframe(owl_features.head())
-
-# ============================================================
-# STEP 6 – Load Old Metadata & Standardize motusTagID
-# ============================================================
-df_old = df_old.copy()
-df_old.columns = [c.strip() for c in df_old.columns]
-
-possible_old_ids = [c for c in df_old.columns if "motus" in c.lower() and "tag" in c.lower()]
-possible_old_ids += [c for c in df_old.columns if c.lower() in ["tag_id", "tagid", "motustagid_sheet"]]
-
-if not possible_old_ids:
-    st.error(
-        "Could not find a Motus Tag ID column in clean_df_selected.csv.\n\n"
-        f"Columns found: {list(df_old.columns)}"
-    )
-    st.stop()
-
-old_id_col = possible_old_ids[0]
-df_old.rename(columns={old_id_col: "motusTagID"}, inplace=True)
-df_old["motusTagID"] = pd.to_numeric(df_old["motusTagID"], errors="coerce")
-
-meta_one = df_old.groupby("motusTagID").first().reset_index()
-
-st.write("Old metadata shape:", df_old.shape)
-st.write("Old metadata unique owls:", meta_one["motusTagID"].nunique())
-st.dataframe(meta_one.head())
-
-# ============================================================
-# STEP 7 – Merging Features, True Stay Duration & Metadata
-# ============================================================
-owl_df = owl_features.merge(stay_true, on="motusTagID", how="left")
-owl_df = owl_df.merge(meta_one, on="motusTagID", how="left", suffixes=("", "_meta"))
-
-st.write("Final dataset shape:", owl_df.shape)
-st.write("Final unique owls:", owl_df["motusTagID"].nunique())
-st.dataframe(owl_df.head())
-
-# ============================================================
-# STEP 8 – Categorizing Owls into Residency Types (fixed thresholds)
-# ============================================================
-# Use fixed thresholds exactly like notebook:
-# 0–3 days  -> Vagrant
-# 3–7 days  -> Migrant
-# 7+ days   -> Resident
-short_thr = 3     # short stay threshold in days
-long_thr = 7      # long stay threshold in days
-
-bins = [0, short_thr, long_thr, np.inf]
-labels = ["Vagrant", "Migrant", "Resident"]
-
-owl_df["ResidencyType_true"] = pd.cut(
-    owl_df["stay_duration_days"],
-    bins=bins,
-    labels=labels,
-    include_lowest=True
-)
-
-st.write("ResidencyType_true counts:")
-st.write(owl_df["ResidencyType_true"].value_counts())
-
-st.success("Data pipeline (Steps 2–8) completed as in the notebook!")
-
-# =========================
-# Tabs
-# =========================
-tabs = st.tabs(["📌 Overview", "📊 EDA", "🧠 Modeling", "🧩 XAI"])
-
-# =========================
-# OVERVIEW TAB
-# =========================
-with tabs[0]:
-    st.subheader("Shapes")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Combined rows", df.shape[0])
-    c2.metric("Unique owls (raw)", df["motusTagID"].nunique())
-    c3.metric("Final owl_df rows", owl_df.shape[0])
-
-    st.subheader("Final dataset preview")
-    st.dataframe(owl_df.head(20))
-
-    st.subheader("Stay duration distribution (days)")
-    fig, ax = plt.subplots()
-    ax.hist(owl_df["stay_duration_days"], bins=30)
-    ax.set_xlabel("Stay duration (days)")
-    ax.set_ylabel("Owls")
-    st.pyplot(fig)
-
-# =========================
-# EDA TAB
-# =========================
-with tabs[1]:
-    st.subheader("True Residency Type Distribution (New Motus Data)")
-    st.bar_chart(owl_df["ResidencyType_true"].value_counts())
-
-    # Top 15 owls by number of days stayed
-    st.subheader("Top 15 Owls by Number of Days Stayed")
-    top15 = owl_df.nlargest(15, "stay_duration_days")[["motusTagID", "stay_duration_days"]]
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.bar(top15["motusTagID"].astype(str), top15["stay_duration_days"])
-    ax.set_xlabel("Owl ID")
-    ax.set_ylabel("Stay Duration (days)")
-    ax.set_title("Top 15 Owls by Number of Days Stayed")
-    plt.xticks(rotation=45)
-    st.pyplot(fig)
-
-    # What time of day owls are most active
-    st.subheader("What Time of Day Owls Are Most Active")
-    if "hour" in df.columns:
-        fig, ax = plt.subplots(figsize=(9, 4))
-        ax.hist(df["hour"].dropna(), bins=24)
-        ax.set_xlabel("Hour of Day")
-        ax.set_ylabel("Detections")
-        ax.set_title("What Time of Day Owls Are Most Active")
-        st.pyplot(fig)
-
-    # Daily owl activity at the station (line plot)
-    st.subheader("Daily Owl Activity at the Station")
-    if "date_only" in df.columns:
-        daily = df.groupby("date_only")["motusTagID"].count().reset_index()
-        fig, ax = plt.subplots(figsize=(12, 5))
-        ax.plot(daily["date_only"], daily["motusTagID"], marker="o")
-        ax.set_title("Daily Owl Activity at the Station")
-        ax.set_xlabel("Date")
-        ax.set_ylabel("Number of Detections")
-        ax.grid(True)
-        plt.xticks(rotation=45)
-        st.pyplot(fig)
-
-    st.subheader("Numeric summary of owl_df")
-    st.write(owl_df.describe())
-
-    num_cols_all = owl_df.select_dtypes(include=np.number).columns.tolist()
-    if len(num_cols_all) > 2:
-        st.subheader("Correlation heatmap (numeric features)")
-        corr = owl_df[num_cols_all].corr()
-        fig, ax = plt.subplots(figsize=(10, 6))
-        im = ax.imshow(corr, aspect="auto")
-        ax.set_xticks(range(len(num_cols_all)))
-        ax.set_xticklabels(num_cols_all, rotation=90)
-        ax.set_yticks(range(len(num_cols_all)))
-        ax.set_yticklabels(num_cols_all)
-        fig.colorbar(im)
-        st.pyplot(fig)
-
-# =========================
-# MODELING TAB
-# =========================
-with tabs[2]:
-    st.subheader("Regression: Predict stay_duration_days")
-
-    # Step 9 – Preparing data for regression
+    # 8) Regression features
     y_reg = owl_df["stay_duration_days"]
     drop_cols = ["motusTagID", "stay_duration_days", "ResidencyType_true"]
-    X = owl_df.drop(columns=[c for c in drop_cols if c in owl_df.columns], errors="ignore")
+    X_reg = owl_df.drop(columns=[c for c in drop_cols if c in owl_df.columns])
 
-    # numeric only
-    X = X.select_dtypes(include=np.number).copy()
-    X = X.dropna(axis=1, how="all")
+    X_reg = X_reg.select_dtypes(include=[np.number]).copy()
+    X_reg = X_reg.dropna(axis=1, how="all")
 
-    # median impute
     imputer = SimpleImputer(strategy="median")
-    X_imp = pd.DataFrame(imputer.fit_transform(X), columns=X.columns, index=X.index)
+    X_imp = pd.DataFrame(imputer.fit_transform(X_reg), columns=X_reg.columns, index=X_reg.index)
 
-    X_train, X_test, y_train, y_test = safe_split(X_imp, y_reg, task="reg")
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_imp, y_reg, test_size=0.2, random_state=42
+    )
 
-    # Step 10 – Training multiple regression models
+    # 9) Regression models
     reg_models = {
         "LinearRegression": LinearRegression(),
         "DecisionTree": DecisionTreeRegressor(max_depth=6, random_state=42),
@@ -367,11 +289,11 @@ with tabs[2]:
             n_estimators=300, learning_rate=0.05, max_depth=4, random_state=42
         ),
         "SVR": make_pipeline(StandardScaler(), SVR(kernel="rbf", C=2.0, epsilon=0.2)),
-        "RandomForest": RandomForestRegressor(n_estimators=400, random_state=42, n_jobs=-1)
+        "RandomForest": RandomForestRegressor(n_estimators=400, random_state=42, n_jobs=-1),
     }
 
     rows = []
-    pred_store = {}
+    pred_store_reg = {}
 
     for name, model in reg_models.items():
         model.fit(X_train, y_train)
@@ -379,190 +301,351 @@ with tabs[2]:
         r2 = r2_score(y_test, pred)
         rmse = np.sqrt(mean_squared_error(y_test, pred))
         rows.append({"Model": name, "R2": r2, "RMSE": rmse})
-        pred_store[name] = pred
+        pred_store_reg[name] = pred
 
-    reg_results = pd.DataFrame(rows).sort_values("R2", ascending=False)
-    st.dataframe(reg_results)
-
+    reg_results = pd.DataFrame(rows).sort_values("R2", ascending=False).reset_index(drop=True)
     best_reg_name = reg_results.iloc[0]["Model"]
     best_reg = reg_models[best_reg_name]
-    st.write(f" Best Regression Model: **{best_reg_name}**")
 
-    # Step 11 – Predicting stay duration for all owls with best model
+    # Train on full data and store predictions
     best_reg.fit(X_imp, y_reg)
-    owl_df["predicted_stay_days"] = best_reg.predict(X_imp)
+    best_pred_full = best_reg.predict(X_imp)
+    owl_df["predicted_stay_days"] = best_pred_full
 
-    st.subheader("Regression: True vs Predicted Stay Duration")
-    fig, ax = plt.subplots(figsize=(7, 6))
-    best_pred = pred_store[best_reg_name]
-    ax.scatter(y_test, best_pred, alpha=0.7, edgecolors="black")
-    ax.set_xlabel("True Stay Duration (days)")
-    ax.set_ylabel("Predicted Stay Duration (days)")
-    ax.set_title(f"Regression: True vs Predicted Stay Duration\nModel = {best_reg_name}")
-    ax.grid(True)
-    st.pyplot(fig)
-
-    st.markdown("---")
-    st.subheader("Classification: Predict ResidencyType_true")
-
-    # Step 12 – Encoding residency labels
-    X_cls = X_imp.copy()
+    # 10) Classification (ResidencyType_true)
     y_cls = owl_df["ResidencyType_true"].astype(str)
-
     le = LabelEncoder()
     y_cls_enc = le.fit_transform(y_cls)
 
-    Xc_train, Xc_test, yc_train, yc_test = safe_split(X_cls, y_cls_enc, task="cls")
+    Xc_train, Xc_test, yc_train, yc_test = train_test_split(
+        X_imp, y_cls_enc, test_size=0.2, random_state=42, stratify=y_cls_enc
+    )
 
-    # Step 13 – Hyperparameter tuning for classification
+    # Candidate classifiers with small hyperparameter grids (like notebook)
     candidates = {
         "LogReg": {
-            "estimator": Pipeline([
-                ("scaler", StandardScaler(with_mean=False)),
-                ("clf", LogisticRegression(max_iter=3000, class_weight="balanced"))
-            ]),
-            "params": {
-                "clf__C": np.logspace(-2, 2, 12),
-                "clf__solver": ["lbfgs", "liblinear"]
-            }
+            "estimator": Pipeline(
+                [("scaler", StandardScaler(with_mean=False)),
+                 ("clf", LogisticRegression(max_iter=3000, class_weight="balanced"))]
+            ),
+            "params": {"clf__C": np.logspace(-2, 2, 12), "clf__solver": ["lbfgs", "liblinear"]},
         },
         "SVC": {
-            "estimator": Pipeline([
-                ("scaler", StandardScaler(with_mean=False)),
-                ("clf", SVC(class_weight="balanced"))
-            ]),
+            "estimator": Pipeline(
+                [("scaler", StandardScaler(with_mean=False)),
+                 ("clf", SVC(class_weight="balanced"))]
+            ),
             "params": {
-                "clf__C": np.logspace(-2, 2, 8),
-                "clf__kernel": ["rbf", "poly"]
-            }
+                "clf__C": np.logspace(-2, 2, 12),
+                "clf__gamma": ["scale", "auto"],
+            },
         },
         "RandomForest": {
-            "estimator": RandomForestClassifier(
-                class_weight="balanced_subsample", random_state=42
-            ),
+            "estimator": RandomForestClassifier(class_weight="balanced_subsample", random_state=42),
             "params": {
                 "n_estimators": [200, 400, 800],
                 "max_depth": [None, 6, 12, 20],
-                "min_samples_split": [2, 5, 10]
-            }
+            },
         },
         "GradientBoosting": {
             "estimator": GradientBoostingClassifier(random_state=42),
             "params": {
-                "n_estimators": [200, 400],
-                "learning_rate": [0.01, 0.05, 0.1],
-                "max_depth": [2, 3, 4]
-            }
-        }
+                "n_estimators": [100, 200, 300],
+                "learning_rate": [0.05, 0.1, 0.2],
+                "max_depth": [2, 3, 4],
+            },
+        },
     }
 
-    search_results = []
     best_models = {}
+    cls_rows = []
 
-    for name, cfg in candidates.items():
-        with st.spinner(f"Tuning {name}..."):
-            search = RandomizedSearchCV(
-                cfg["estimator"],
-                cfg["params"],
-                n_iter=15,
-                cv=3,
-                scoring="f1_weighted",
-                random_state=42,
-                n_jobs=-1
-            )
-            search.fit(Xc_train, yc_train)
-            best_models[name] = search.best_estimator_
+    cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
 
-            ypred = search.best_estimator_.predict(Xc_test)
-            acc = accuracy_score(yc_test, ypred)
-            f1 = f1_score(yc_test, ypred, average="weighted")
+    for name, spec in candidates.items():
+        search = RandomizedSearchCV(
+            estimator=spec["estimator"],
+            param_distributions=spec["params"],
+            n_iter=15,
+            cv=cv,
+            scoring="f1_macro",
+            random_state=42,
+            n_jobs=-1,
+        )
+        search.fit(Xc_train, yc_train)
+        best_models[name] = search.best_estimator_
+        cls_rows.append({"Model": name, "BestScore(f1_macro)": search.best_score_})
 
-            search_results.append({
-                "Model": name,
-                "BestParams": search.best_params_,
-                "Test_Accuracy": acc,
-                "Test_F1": f1
-            })
-
-    cls_results = pd.DataFrame(search_results).sort_values("Test_F1", ascending=False)
-    st.dataframe(cls_results)
+    cls_results = pd.DataFrame(cls_rows).sort_values(
+        "BestScore(f1_macro)", ascending=False
+    ).reset_index(drop=True)
 
     best_cls_name = cls_results.iloc[0]["Model"]
     best_cls = best_models[best_cls_name]
-    st.write(f"Best Classification Model: **{best_cls_name}**")
 
-    # Step 14 – Classification report + confusion matrix
     yc_pred = best_cls.predict(Xc_test)
 
-    all_labels = np.arange(len(le.classes_))  # [0,1,2] for Vagrant, Migrant, Resident
+    return {
+        "df_det": df,  # detection-level with DATETIME + hour
+        "owl_df": owl_df,
+        "X_imp": X_imp,
+        "X_train": X_train,
+        "X_test": X_test,
+        "y_train": y_train,
+        "y_test": y_test,
+        "reg_results": reg_results,
+        "best_reg_name": best_reg_name,
+        "best_reg": best_reg,
+        "best_reg_pred_test": pred_store_reg[best_reg_name],
+        "Xc_train": Xc_train,
+        "Xc_test": Xc_test,
+        "yc_train": yc_train,
+        "yc_test": yc_test,
+        "le": le,
+        "cls_results": cls_results,
+        "best_cls_name": best_cls_name,
+        "best_cls": best_cls,
+        "yc_pred": yc_pred,
+    }
 
-    st.text("Classification Report:")
-    st.text(classification_report(
-        yc_test,
-        yc_pred,
-        labels=all_labels,
-        target_names=le.classes_,
-        zero_division=0
-    ))
 
-    cm = confusion_matrix(yc_test, yc_pred, labels=all_labels)
-    fig, ax = plt.subplots()
-    im = ax.imshow(cm, aspect="auto")
-    ax.set_xticks(range(len(le.classes_)))
-    ax.set_xticklabels(le.classes_)
-    ax.set_yticks(range(len(le.classes_)))
-    ax.set_yticklabels(le.classes_)
-    ax.set_xlabel("Predicted")
-    ax.set_ylabel("True")
-    ax.set_title(f"Confusion Matrix — {best_cls_name}")
-    fig.colorbar(im)
-    st.pyplot(fig)
+# -------------------------------------------------------------------
+# Sidebar – file upload ONLY
+# -------------------------------------------------------------------
+st.sidebar.header("1) Upload data")
 
-    # store for XAI tab
-    st.session_state["best_reg"] = best_reg
-    st.session_state["best_cls"] = best_cls
-    st.session_state["X_imp"] = X_imp
-    st.session_state["y_reg"] = y_reg
-    st.session_state["Xc_test"] = Xc_test
-    st.session_state["yc_test"] = yc_test
+st.sidebar.markdown("**Upload your final combined detection dataset and old metadata CSVs.**")
 
-# =========================
-# XAI TAB
-# =========================
-with tabs[3]:
-    st.subheader("Explainability (XAI)")
+combined_file = st.sidebar.file_uploader(
+    "FINAL combined dataset (combined_sawwhet_owls.csv)", type=["csv"], key="combined"
+)
 
-    if "best_reg" not in st.session_state:
-        st.info("Train models first in the Modeling tab.")
-        st.stop()
+old_meta_file = st.sidebar.file_uploader(
+    "OLD metadata (clean_df_selected.csv)", type=["csv"], key="oldmeta"
+)
 
-    best_reg = st.session_state["best_reg"]
-    best_cls = st.session_state["best_cls"]
-    X_imp = st.session_state["X_imp"]
-    y_reg = st.session_state["y_reg"]
-    Xc_test = st.session_state["Xc_test"]
-    yc_test = st.session_state["yc_test"]
+st.sidebar.markdown("---")
+st.sidebar.write(f"Residency thresholds (fixed):")
+st.sidebar.write(f"- 0–{SHORT_THR} days → **Vagrant**")
+st.sidebar.write(f"- {SHORT_THR}–{LONG_THR} days → **Migrant**")
+st.sidebar.write(f"- {LONG_THR}+ days → **Resident**")
 
-    st.markdown("### Regression Feature Importance (Permutation)")
-    try:
-        r = permutation_importance(best_reg, X_imp, y_reg, n_repeats=10, random_state=42)
-        imp_vals = pd.Series(r.importances_mean, index=X_imp.columns).sort_values(ascending=False)
+# -------------------------------------------------------------------
+# Main logic
+# -------------------------------------------------------------------
+if (combined_file is None) or (old_meta_file is None):
+    st.info(" Please upload **both** CSV files in the sidebar to see EDA, modelling, and XAI.")
+else:
+    df_new = load_csv_from_upload(combined_file)
+    df_old = load_csv_from_upload(old_meta_file)
 
-        fig, ax = plt.subplots()
-        imp_vals.head(15).plot(kind="bar", ax=ax)
-        ax.set_ylabel("Importance")
-        st.pyplot(fig)
-    except Exception as e:
-        st.warning(f"Regression permutation importance failed: {e}")
+    st.write("### Uploaded Data Overview")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.write("**New MOTUS detections (combined_sawwhet_owls.csv)**")
+        st.write(df_new.head())
+        st.write(f"Shape: {df_new.shape}")
+    with c2:
+        st.write("**Old metadata (clean_df_selected.csv)**")
+        st.write(df_old.head())
+        st.write(f"Shape: {df_old.shape}")
 
-    st.markdown("### Classification Feature Importance (Permutation)")
-    try:
-        r2 = permutation_importance(best_cls, Xc_test, yc_test, n_repeats=10, random_state=42)
-        imp_vals2 = pd.Series(r2.importances_mean, index=Xc_test.columns).sort_values(ascending=False)
+    # Prepare datasets & models
+    data_dict = prepare_model_data(df_new, df_old)
 
-        fig, ax = plt.subplots()
-        imp_vals2.head(15).plot(kind="bar", ax=ax)
-        ax.set_ylabel("Importance")
-        st.pyplot(fig)
-    except Exception as e:
-        st.warning(f"Classification permutation importance failed: {e}")
+    df_det = data_dict["df_det"]
+    owl_df = data_dict["owl_df"]
+
+    # Tabs: EDA, Modelling, XAI
+    tab_eda, tab_model, tab_xai = st.tabs(["📊 EDA & Feature Engineering", "🤖 Modelling & Results", "🔍 XAI"])
+
+    # -------------------------------------------------------------------
+    # TAB 1: EDA & Feature Engineering (using your EDA notebook content)
+    # -------------------------------------------------------------------
+    with tab_eda:
+        st.header("Exploratory Data Analysis (New MOTUS Detections)")
+
+        st.subheader("Raw Detection-Level Snapshot")
+        st.write(df_det.head())
+
+        plot_detections_per_owl(df_det)
+        plot_before_after_boxplots(df_det)
+        plot_signal_corr_heatmap(df_det)
+        eda_summary_text()
+
+    # -------------------------------------------------------------------
+    # TAB 2: Modelling & Results (your modelling notebook graphs)
+    # -------------------------------------------------------------------
+    with tab_model:
+        st.header("Regression & Classification Modelling")
+
+        st.subheader("1. Final Owl-Level Modelling Dataset")
+        st.write(f"Final dataset shape: {owl_df.shape}")
+        st.write(f"Final unique owls: {owl_df['motusTagID'].nunique()}")
+        st.dataframe(owl_df.head())
+
+        # Regression results
+        st.subheader("2. Regression Models – Predicting Stay Duration (days)")
+        st.write(data_dict["reg_results"])
+
+        best_reg_name = data_dict["best_reg_name"]
+        st.markdown(f"**Best regression model:** `{best_reg_name}`")
+
+        # Scatter: true vs predicted (test)
+        y_test = data_dict["y_test"]
+        best_pred_test = data_dict["best_reg_pred_test"]
+
+        fig_scatter, ax_scatter = plt.subplots(figsize=(6, 6))
+        ax_scatter.scatter(y_test, best_pred_test, alpha=0.7, edgecolor="black")
+        ax_scatter.set_xlabel("True Stay Duration (days)")
+        ax_scatter.set_ylabel("Predicted Stay Duration (days)")
+        ax_scatter.set_title(f"Regression: True vs Predicted Stay Duration\nModel = {best_reg_name}")
+        ax_scatter.grid(True)
+        st.pyplot(fig_scatter)
+
+        # Residency distribution (true labels)
+        st.subheader("3. Residency Type Distribution (True Labels)")
+        fig_res, ax_res = plt.subplots(figsize=(6, 4))
+        owl_df["ResidencyType_true"].value_counts().plot(kind="bar", ax=ax_res)
+        ax_res.set_title("True Residency Type Distribution (New Motus Data)")
+        ax_res.set_xlabel("ResidencyType_true")
+        ax_res.set_ylabel("Owls")
+        st.pyplot(fig_res)
+
+        # Classification report + confusion matrix
+        st.subheader("4. Classification Performance (Residency Type)")
+        best_cls_name = data_dict["best_cls_name"]
+        best_cls = data_dict["best_cls"]
+        yc_test = data_dict["yc_test"]
+        yc_pred = data_dict["yc_pred"]
+        le = data_dict["le"]
+
+        all_labels = np.arange(len(le.classes_))
+
+        st.markdown(f"**Best classification model:** `{best_cls_name}`")
+        report_txt = classification_report(
+            yc_test, yc_pred, labels=all_labels, target_names=le.classes_, zero_division=0
+        )
+        st.text(report_txt)
+
+        cm = confusion_matrix(yc_test, yc_pred, labels=all_labels)
+        fig_cm, ax_cm = plt.subplots(figsize=(5, 4))
+        sns.heatmap(
+            cm,
+            annot=True,
+            fmt="d",
+            cmap="Blues",
+            xticklabels=le.classes_,
+            yticklabels=le.classes_,
+            ax=ax_cm,
+        )
+        ax_cm.set_xlabel("Predicted")
+        ax_cm.set_ylabel("True")
+        ax_cm.set_title(f"Confusion Matrix — {best_cls_name}")
+        st.pyplot(fig_cm)
+
+        # Extra modelling visualizations (from your notebook)
+        st.subheader("5. Top 15 Owls by Number of Days Stayed")
+        top15 = owl_df.sort_values("stay_duration_days", ascending=False).head(15)
+        fig_top, ax_top = plt.subplots(figsize=(10, 4))
+        ax_top.bar(top15["motusTagID"].astype(str), top15["stay_duration_days"])
+        ax_top.set_title("Top 15 Owls by Number of Days Stayed")
+        ax_top.set_xlabel("Owl ID")
+        ax_top.set_ylabel("Stay Duration (days)")
+        plt.xticks(rotation=45, ha="right")
+        st.pyplot(fig_top)
+
+        # Hour-of-day activity histogram
+        st.subheader("6. What Time of Day Owls Are Most Active")
+        if "hour" in df_det.columns:
+            fig_hr, ax_hr = plt.subplots(figsize=(9, 4))
+            sns.histplot(df_det["hour"].dropna(), bins=24, kde=False, ax=ax_hr)
+            ax_hr.set_title("What Time of Day Owls Are Most Active")
+            ax_hr.set_xlabel("Hour of Day")
+            ax_hr.set_ylabel("Detections")
+            st.pyplot(fig_hr)
+        else:
+            st.warning("`hour` column missing from detection-level data; cannot plot hourly activity.")
+
+        # Daily owl activity line plot
+        st.subheader("7. Daily Owl Activity at the Station")
+        if "DATETIME" in df_det.columns:
+            df_det["date_only"] = df_det["DATETIME"].dt.date
+            daily = df_det.groupby("date_only")["motusTagID"].count().reset_index()
+            fig_daily, ax_daily = plt.subplots(figsize=(12, 5))
+            ax_daily.plot(daily["date_only"], daily["motusTagID"], marker="o")
+            ax_daily.set_title("Daily Owl Activity at the Station")
+            ax_daily.set_xlabel("Date")
+            ax_daily.set_ylabel("Number of Detections")
+            plt.xticks(rotation=45, ha="right")
+            ax_daily.grid(True)
+            st.pyplot(fig_daily)
+        else:
+            st.warning("`DATETIME` column missing from detection-level data; cannot plot daily activity.")
+
+    # -------------------------------------------------------------------
+    # TAB 3: XAI (Permutation Importance)
+    # -------------------------------------------------------------------
+    with tab_xai:
+        st.header("Explainable AI (XAI)")
+
+        X_test = data_dict["X_test"]
+        y_test = data_dict["y_test"]
+        Xc_test = data_dict["Xc_test"]
+        yc_test = data_dict["yc_test"]
+
+        st.subheader("1. Feature Importance for Regression (Permutation Importance)")
+        best_reg = data_dict["best_reg"]
+
+        perm_reg = permutation_importance(
+            best_reg, X_test, y_test, n_repeats=20, random_state=42, n_jobs=-1
+        )
+        reg_imp = pd.DataFrame(
+            {"feature": X_test.columns, "importance": perm_reg.importances_mean}
+        ).sort_values("importance", ascending=False)
+
+        st.write("Top 10 most important features driving **stay_duration_days** predictions:")
+        st.write(reg_imp.head(10))
+
+        fig_reg_imp, ax_reg_imp = plt.subplots(figsize=(8, 4))
+        ax_reg_imp.barh(
+            reg_imp["feature"].head(10)[::-1],
+            reg_imp["importance"].head(10)[::-1],
+        )
+        ax_reg_imp.set_title("Permutation Feature Importance (Regression)")
+        ax_reg_imp.set_xlabel("Mean Importance")
+        st.pyplot(fig_reg_imp)
+
+        st.subheader("2. Feature Importance for Classification (Permutation Importance)")
+        best_cls = data_dict["best_cls"]
+
+        perm_cls = permutation_importance(
+            best_cls, Xc_test, yc_test, n_repeats=20, random_state=42, n_jobs=-1
+        )
+        cls_imp = pd.DataFrame(
+            {"feature": Xc_test.columns, "importance": perm_cls.importances_mean}
+        ).sort_values("importance", ascending=False)
+
+        st.write("Top 10 most important features for **ResidencyType_true** classification:")
+        st.write(cls_imp.head(10))
+
+        fig_cls_imp, ax_cls_imp = plt.subplots(figsize=(8, 4))
+        ax_cls_imp.barh(
+            cls_imp["feature"].head(10)[::-1],
+            cls_imp["importance"].head(10)[::-1],
+        )
+        ax_cls_imp.set_title("Permutation Feature Importance (Classification)")
+        ax_cls_imp.set_xlabel("Mean Importance")
+        st.pyplot(fig_cls_imp)
+
+        st.markdown(
+            """
+These importance plots help BBO staff understand **which behavioural or tag-related
+features most strongly influence**:
+
+- How long an owl stays near the station (regression target), and  
+- Whether an owl behaves like a Vagrant, Migrant, or Resident (classification target).
+
+This makes the model decisions more **transparent and actionable** for future research.
+            """
+        )
