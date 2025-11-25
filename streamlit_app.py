@@ -41,6 +41,11 @@ upload_mode = st.sidebar.radio(
     ["Private Manual Upload", "Local/Drive Path"]
 )
 
+st.sidebar.caption(
+    "Residency thresholds are fixed to 0–3 days (Vagrant), "
+    "3–7 days (Migrant), 7+ days (Resident), same as the notebook."
+)
+
 combined_csv = None
 old_meta_file = None
 
@@ -120,7 +125,7 @@ id_col = possible_id_cols[0]
 df.rename(columns={id_col: "motusTagID"}, inplace=True)
 df["motusTagID"] = pd.to_numeric(df["motusTagID"], errors="coerce")
 
-st.write("Possible ID cols in NEW detections:", possible_id_cols)
+st.write("🔎 Possible ID cols in NEW detections:", possible_id_cols)
 st.write("Unique owls in NEW detections:", df["motusTagID"].nunique())
 
 # ============================================================
@@ -227,8 +232,15 @@ st.write("Final unique owls:", owl_df["motusTagID"].nunique())
 st.dataframe(owl_df.head())
 
 # ============================================================
-# STEP 8 – Categorizing Owls into Residency Types
+# STEP 8 – Categorizing Owls into Residency Types (fixed thresholds)
 # ============================================================
+# Use fixed thresholds exactly like notebook:
+# 0–3 days  -> Vagrant
+# 3–7 days  -> Migrant
+# 7+ days   -> Resident
+short_thr = 3     # short stay threshold in days
+long_thr = 7      # long stay threshold in days
+
 bins = [0, short_thr, long_thr, np.inf]
 labels = ["Vagrant", "Migrant", "Resident"]
 
@@ -242,7 +254,7 @@ owl_df["ResidencyType_true"] = pd.cut(
 st.write("ResidencyType_true counts:")
 st.write(owl_df["ResidencyType_true"].value_counts())
 
-st.success(" Data pipeline (Steps 2–8) completed as in the notebook!")
+st.success("Data pipeline (Steps 2–8) completed as in the notebook!")
 
 # =========================
 # Tabs
@@ -477,7 +489,7 @@ with tabs[2]:
 
     best_cls_name = cls_results.iloc[0]["Model"]
     best_cls = best_models[best_cls_name]
-    st.write(f" Best Classification Model: **{best_cls_name}**")
+    st.write(f"Best Classification Model: **{best_cls_name}**")
 
     # Step 14 – Classification report + confusion matrix
     yc_pred = best_cls.predict(Xc_test)
