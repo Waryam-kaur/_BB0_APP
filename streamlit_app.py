@@ -533,18 +533,29 @@ else:
         st.write(df_old.head())
         st.write(f"Shape: {df_old.shape}")
 
-    # Prepare datasets & models
-    data_dict = prepare_model_data(df_new, df_old)
+        data_dict = prepare_model_data(df_new, df_old)
 
     df_det = data_dict["df_det"]
     owl_df = data_dict["owl_df"]
 
-   tab_eda, tab_model, tab_xai, tab_rag = st.tabs(
-    ["📊 EDA & Feature Engineering",
-     "🤖 Modelling & Results",
-     "🔍 XAI",
-     "💬 RAG Chatbot"]
-)
+    # Tabs: EDA, Modelling, XAI, RAG
+    tab_eda, tab_model, tab_xai, tab_rag = st.tabs(
+        [
+            "📊 EDA & Feature Engineering",
+            "🤖 Modelling & Results",
+            "🔍 XAI",
+            "💬 RAG Chatbot",
+        ]
+    )
+
+    # -------------------------------------------------------------------
+    # TAB 1: EDA & Feature Engineering
+    # -------------------------------------------------------------------
+    with tab_eda:
+        st.header("Exploratory Data Analysis (New MOTUS Detections)")
+        ...
+
+
 
     )
 
