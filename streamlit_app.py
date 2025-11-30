@@ -1,5 +1,3 @@
-# streamlit_app.py
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -30,6 +28,10 @@ from sklearn.ensemble import (
 from sklearn.svm import SVR, SVC
 from sklearn.inspection import permutation_importance
 
+#  NEW RAG imports
+from sentence_transformers import SentenceTransformer, util
+from transformers import pipeline
+
 warnings.filterwarnings("ignore")
 
 # -------------------------------------------------------------------
@@ -42,7 +44,7 @@ LONG_THR = 7.0    # 3–7 days -> Migrant ; 7+ -> Resident
 # Streamlit page config
 # -------------------------------------------------------------------
 st.set_page_config(page_title="BBO Owl Migration App", layout="wide")
-st.title("🦉 BBO Owl Migration App (EDA + FE + Modeling + XAI)")
+st.title("🦉 BBO Owl Migration App (EDA + FE + Modeling + XAI + RAG Chatbot)")
 
 # -------------------------------------------------------------------
 # Helper EDA functions (from your EDA notebook)
@@ -124,7 +126,7 @@ def plot_signal_corr_heatmap(df_det):
 
 
 def eda_summary_text():
-    st.subheader("4. EDA & Feature Engineering Summary (From Notebook)")
+    st.subheader("4. EDA & Feature Engineering Summary )")
     st.markdown(
         """
 We started with a multi-sheet MOTUS dataset containing raw owl detections from 42 receiver stations.  
@@ -410,6 +412,91 @@ def prepare_model_data(df_new, df_old):
 
 
 # -------------------------------------------------------------------
+# RAG Chatbot helpers (uses owl_df as the knowledge base)
+# -------------------------------------------------------------------
+
+@st.cache_resource
+def load_rag_embedder():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+
+@st.cache_resource
+def load_rag_generator():
+    return pipeline("text2text-generation", model="google/flan-t5-large")
+
+
+@st.cache_data
+def build_owl_documents(owl_df: pd.DataFrame):
+    """
+    Turn each owl's stay info into a short text document.
+    This is the 'knowledge base' for the RAG chatbot.
+    """
+    docs = []
+    for _, row in owl_df.iterrows():
+        if pd.isna(row.get("stay_duration_days")):
+            continue
+
+        motus_id = row.get("motusTagID")
+        stay = row.get("stay_duration_days")
+        residency = row.get("ResidencyType_true")
+        detections = row.get("detections_count")
+
+        text = (
+            f"Owl {int(motus_id)} stayed at the station for about "
+            f"{stay:.1f} days, with {int(detections)} detections, "
+            f"and was categorized as a {residency}."
+        )
+        docs.append(text)
+
+    return docs
+
+
+def retrieve_context_owl(query: str, docs, top_k: int = 3) -> str:
+    """
+    Simple retrieval: compute similarity between the query and each doc,
+    then return the top_k most similar texts as context.
+    """
+    embedder = load_rag_embedder()
+    query_emb = embedder.encode(query, convert_to_tensor=True)
+
+    scored_docs = []
+    for text in docs:
+        doc_emb = embedder.encode(text, convert_to_tensor=True)
+        score = util.pytorch_cos_sim(query_emb, doc_emb).item()
+        scored_docs.append((score, text))
+
+    scored_docs.sort(reverse=True, key=lambda x: x[0])
+    top_texts = [t for _, t in scored_docs[:top_k]]
+
+    return "\n\n".join(top_texts)
+
+
+def query_llm_with_context(query: str, context: str) -> str:
+    """
+    Ask the FLAN-T5 model to answer using only the provided context.
+    """
+    generator = load_rag_generator()
+
+    prompt = (
+        "You are helping biologists understand owl migration data. "
+        "Use ONLY the context below to answer the question. "
+        "If the answer is not in the context, say you are not sure.\n\n"
+        f"Context:\n{context}\n\n"
+        f"Question: {query}\n\n"
+        "Answer:"
+    )
+
+    output = generator(prompt, max_new_tokens=200, do_sample=True, temperature=0.7)
+    return output[0]["generated_text"].strip()
+
+
+def rag_chatbot_owl(query: str, docs):
+    context = retrieve_context_owl(query, docs, top_k=3)
+    answer = query_llm_with_context(query, context)
+    return answer, context
+
+
+# -------------------------------------------------------------------
 # Sidebar – file upload ONLY
 # -------------------------------------------------------------------
 st.sidebar.header("1) Upload data")
@@ -434,7 +521,7 @@ st.sidebar.write(f"- {LONG_THR}+ days → **Resident**")
 # Main logic
 # -------------------------------------------------------------------
 if (combined_file is None) or (old_meta_file is None):
-    st.info(" Please upload **both** CSV files in the sidebar to see EDA, modelling, and XAI.")
+    st.info(" Please upload **both** CSV files in the sidebar to see EDA, modelling, XAI, and the RAG chatbot.")
 else:
     df_new = load_csv_from_upload(combined_file)
     df_old = load_csv_from_upload(old_meta_file)
@@ -456,11 +543,13 @@ else:
     df_det = data_dict["df_det"]
     owl_df = data_dict["owl_df"]
 
-    # Tabs: EDA, Modelling, XAI
-    tab_eda, tab_model, tab_xai = st.tabs(["📊 EDA & Feature Engineering", "🤖 Modelling & Results", "🔍 XAI"])
+    # Tabs: EDA, Modelling, XAI, RAG
+    tab_eda, tab_model, tab_xai, tab_rag = st.tabs(
+        ["📊 EDA & Feature Engineering", "🤖 Modelling & Results", "🔍 XAI", "💬 RAG Chatbot"]
+    )
 
     # -------------------------------------------------------------------
-    # TAB 1: EDA & Feature Engineering (using your EDA notebook content)
+    # TAB 1: EDA & Feature Engineering
     # -------------------------------------------------------------------
     with tab_eda:
         st.header("Exploratory Data Analysis (New MOTUS Detections)")
@@ -474,7 +563,7 @@ else:
         eda_summary_text()
 
     # -------------------------------------------------------------------
-    # TAB 2: Modelling & Results (your modelling notebook graphs)
+    # TAB 2: Modelling & Results
     # -------------------------------------------------------------------
     with tab_model:
         st.header("Regression & Classification Modelling")
@@ -544,7 +633,7 @@ else:
         ax_cm.set_title(f"Confusion Matrix — {best_cls_name}")
         st.pyplot(fig_cm)
 
-        # Extra modelling visualizations (from your notebook)
+        # Extra modelling visualizations
         st.subheader("5. Top 15 Owls by Number of Days Stayed")
         top15 = owl_df.sort_values("stay_duration_days", ascending=False).head(15)
         fig_top, ax_top = plt.subplots(figsize=(10, 4))
@@ -649,3 +738,46 @@ features most strongly influence**:
 This makes the model decisions more **transparent and actionable** for future research.
             """
         )
+
+    # -------------------------------------------------------------------
+    # TAB 4: RAG Chatbot – question answering from owl data
+    # -------------------------------------------------------------------
+    with tab_rag:
+        st.header("💬 RAG Chatbot – Ask Questions About Owl Residency")
+
+        st.markdown(
+            """
+This chatbot uses a **Retrieval-Augmented Generation (RAG)** pipeline:
+
+1. It converts each owl's stay information into a short text document.  
+2. For your question, it finds the most relevant documents using sentence embeddings.  
+3. It then asks a small language model (FLAN-T5) to answer based **only on that context**.
+            """
+        )
+
+        docs = build_owl_documents(owl_df)
+
+        if not docs:
+            st.warning("No documents were built from owl_df – check that stay_duration_days is available.")
+        else:
+            user_q = st.text_input(
+                "Type your question about owl stay duration, residency type, or detections:",
+                placeholder="e.g., Which owls stayed the longest, or what is a Resident owl?"
+            )
+
+            if st.button("Ask the RAG Chatbot"):
+                if not user_q.strip():
+                    st.warning("Please enter a question first.")
+                else:
+                    with st.spinner("Thinking..."):
+                        answer, used_context = rag_chatbot_owl(user_q, docs)
+
+                    st.markdown("### ✅ Answer")
+                    st.write(answer)
+
+                    st.markdown("### 🔎 Context used from the data")
+                    st.write(
+                        "Below are the owl records the model used to answer your question "
+                        "(this is the 'retrieved' part of RAG):"
+                    )
+                    st.code(used_context)
