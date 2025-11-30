@@ -420,27 +420,56 @@ def prepare_model_data(df_new, df_old):
 def build_owl_documents(owl_df: pd.DataFrame):
     """
     Build short text 'documents' for each owl.
-    Analogy to documents dict in RAG_Implementation.ipynb.
+
+    This version is VERY defensive: it handles NaNs / missing values
+    so that it never crashes when we click the chatbot button.
     """
     docs = []
+
+    if owl_df is None or owl_df.empty:
+        return docs
+
     for _, row in owl_df.iterrows():
-        if pd.isna(row.get("stay_duration_days")):
+        # stay duration is our main thing; skip if totally missing
+        stay = row.get("stay_duration_days", np.nan)
+        if pd.isna(stay):
             continue
 
-        motus_id = row.get("motusTagID")
-        stay = row.get("stay_duration_days")
-        residency = row.get("ResidencyType_true")
-        detections = row.get("detections_count")
+        # motusTagID
+        motus_id = row.get("motusTagID", "Unknown")
+        if pd.isna(motus_id):
+            motus_str = "Unknown ID"
+        else:
+            try:
+                motus_str = str(int(motus_id))
+            except Exception:
+                motus_str = str(motus_id)
+
+        # residency type
+        residency = row.get("ResidencyType_true", "Unknown")
+        if pd.isna(residency):
+            residency = "Unknown"
+
+        # detections
+        detections = row.get("detections_count", np.nan)
+        if pd.isna(detections):
+            detections_str = "an unknown number of"
+        else:
+            try:
+                detections_str = str(int(detections))
+            except Exception:
+                detections_str = str(detections)
 
         text = (
-            f"Owl {int(motus_id)} stayed at the station for about "
-            f"{stay:.1f} days, with {int(detections)} detections, "
+            f"Owl {motus_str} stayed at the station for about "
+            f"{float(stay):.1f} days, with {detections_str} detections, "
             f"and was categorized as a {residency}."
         )
+
         docs.append(text)
 
-    return docs
-
+    # (Optional) limit to first 300 docs to be extra safe
+    return docs[:300]
 
 def simple_retrieve_context(query: str, docs, top_k: int = 5) -> str:
     """
