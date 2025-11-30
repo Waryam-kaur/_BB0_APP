@@ -42,7 +42,7 @@ LONG_THR = 7.0    # 3–7 days -> Migrant ; 7+ -> Resident
 # Streamlit page config
 # -------------------------------------------------------------------
 st.set_page_config(page_title="BBO Owl Migration App", layout="wide")
-st.title("🦉 BBO Owl Migration App (EDA + FE + Modeling + XAI + RAG Chatbot)")
+st.title("🦉 BBO Owl Migration App" )
 
 # -------------------------------------------------------------------
 # Helper EDA functions (from your EDA notebook)
