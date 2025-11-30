@@ -14,6 +14,7 @@ from sklearn.metrics import (
     mean_squared_error,
     classification_report,
     confusion_matrix,
+    f1_score
 )
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.tree import DecisionTreeRegressor
@@ -26,7 +27,7 @@ from sklearn.ensemble import (
 from sklearn.svm import SVR, SVC
 from sklearn.inspection import permutation_importance
 
-# ✅ Lightweight RAG imports (no transformers)
+#  Lightweight RAG imports 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -157,7 +158,8 @@ def load_csv_from_upload(uploaded):
 
 @st.cache_data(show_spinner=True)
 def prepare_model_data(df_new, df_old):
-    """Replicates your modelling notebook steps, returns many useful objects."""
+    """Feature engineering + LIGHT modelling (no RandomizedSearchCV)."""
+
     df = df_new.copy()
 
     # 1) Standardize motusTagID column
@@ -172,7 +174,6 @@ def prepare_model_data(df_new, df_old):
     df["motusTagID"] = pd.to_numeric(df["motusTagID"], errors="coerce")
 
     # 2) Build DATETIME
-    df = df.copy()
     if "DATETIME" in df.columns:
         df["DATETIME"] = pd.to_datetime(df["DATETIME"], errors="coerce")
     else:
@@ -234,7 +235,6 @@ def prepare_model_data(df_new, df_old):
 
     # 5) Old metadata (one row per owl)
     df_old_local = df_old.copy()
-
     old_id_candidates = [
         c
         for c in df_old_local.columns
@@ -263,7 +263,7 @@ def prepare_model_data(df_new, df_old):
         owl_df["stay_duration_days"], bins=bins, labels=labels, include_lowest=True
     )
 
-    # 8) Regression features
+    # ---------------- REGRESSION ----------------
     y_reg = owl_df["stay_duration_days"]
     drop_cols = ["motusTagID", "stay_duration_days", "ResidencyType_true"]
     X_reg = owl_df.drop(columns=[c for c in drop_cols if c in owl_df.columns])
@@ -278,18 +278,17 @@ def prepare_model_data(df_new, df_old):
         X_imp, y_reg, test_size=0.2, random_state=42
     )
 
-    # 9) Regression models
     reg_models = {
         "LinearRegression": LinearRegression(),
         "DecisionTree": DecisionTreeRegressor(max_depth=6, random_state=42),
         "GradientBoosting": GradientBoostingRegressor(
-            n_estimators=300, learning_rate=0.05, max_depth=4, random_state=42
+            n_estimators=200, learning_rate=0.05, max_depth=4, random_state=42
         ),
-        "SVR": make_pipeline(StandardScaler(), SVR(kernel="rbf", C=2.0, epsilon=0.2)),
-        "RandomForest": RandomForestRegressor(n_estimators=400, random_state=42, n_jobs=-1),
+        "SVR": make_pipeline(StandardScaler(), SVR(kernel="rbf", C=1.0, epsilon=0.2)),
+        "RandomForest": RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1),
     }
 
-    rows = []
+    reg_rows = []
     pred_store_reg = {}
 
     for name, model in reg_models.items():
@@ -297,10 +296,10 @@ def prepare_model_data(df_new, df_old):
         pred = model.predict(X_test)
         r2 = r2_score(y_test, pred)
         rmse = np.sqrt(mean_squared_error(y_test, pred))
-        rows.append({"Model": name, "R2": r2, "RMSE": rmse})
+        reg_rows.append({"Model": name, "R2": r2, "RMSE": rmse})
         pred_store_reg[name] = pred
 
-    reg_results = pd.DataFrame(rows).sort_values("R2", ascending=False).reset_index(drop=True)
+    reg_results = pd.DataFrame(reg_rows).sort_values("R2", ascending=False).reset_index(drop=True)
     best_reg_name = reg_results.iloc[0]["Model"]
     best_reg = reg_models[best_reg_name]
 
@@ -309,7 +308,7 @@ def prepare_model_data(df_new, df_old):
     best_pred_full = best_reg.predict(X_imp)
     owl_df["predicted_stay_days"] = best_pred_full
 
-    # 10) Classification (ResidencyType_true)
+    # ---------------- CLASSIFICATION ----------------
     y_cls = owl_df["ResidencyType_true"].astype(str)
     le = LabelEncoder()
     y_cls_enc = le.fit_transform(y_cls)
@@ -318,70 +317,49 @@ def prepare_model_data(df_new, df_old):
         X_imp, y_cls_enc, test_size=0.2, random_state=42, stratify=y_cls_enc
     )
 
-    candidates = {
-        "LogReg": {
-            "estimator": Pipeline(
-                [
-                    ("scaler", StandardScaler(with_mean=False)),
-                    ("clf", LogisticRegression(max_iter=3000, class_weight="balanced")),
-                ]
-            ),
-            "params": {"clf__C": np.logspace(-2, 2, 12), "clf__solver": ["lbfgs", "liblinear"]},
-        },
-        "SVC": {
-            "estimator": Pipeline(
-                [
-                    ("scaler", StandardScaler(with_mean=False)),
-                    ("clf", SVC(class_weight="balanced")),
-                ]
-            ),
-            "params": {
-                "clf__C": np.logspace(-2, 2, 12),
-                "clf__gamma": ["scale", "auto"],
-            },
-        },
-        "RandomForest": {
-            "estimator": RandomForestClassifier(class_weight="balanced_subsample", random_state=42),
-            "params": {
-                "n_estimators": [200, 400, 800],
-                "max_depth": [None, 6, 12, 20],
-            },
-        },
-        "GradientBoosting": {
-            "estimator": GradientBoostingClassifier(random_state=42),
-            "params": {
-                "n_estimators": [100, 200, 300],
-                "learning_rate": [0.05, 0.1, 0.2],
-                "max_depth": [2, 3, 4],
-            },
-        },
+    cls_models = {
+        "LogReg": Pipeline(
+            [
+                ("scaler", StandardScaler(with_mean=False)),
+                ("clf", LogisticRegression(max_iter=2000, class_weight="balanced")),
+            ]
+        ),
+        "SVC": Pipeline(
+            [
+                ("scaler", StandardScaler(with_mean=False)),
+                ("clf", SVC(class_weight="balanced", C=1.0, gamma="scale")),
+            ]
+        ),
+        "RandomForest": RandomForestClassifier(
+            class_weight="balanced_subsample", random_state=42, n_estimators=200, max_depth=None
+        ),
+        "GradientBoosting": GradientBoostingClassifier(
+            random_state=42, n_estimators=150, learning_rate=0.1, max_depth=3
+        ),
     }
 
-    best_models = {}
-    cls_rows = []
+    cls_rows = {}
+    best_cls = None
+    best_cls_name = None
+    best_f1 = -1.0
 
-    cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+    for name, model in cls_models.items():
+        model.fit(Xc_train, yc_train)
+        preds = model.predict(Xc_test)
+        f1 = f1_score(yc_test, preds, average="macro")
+        cls_rows[name] = f1
+        if f1 > best_f1:
+            best_f1 = f1
+            best_cls = model
+            best_cls_name = name
 
-    for name, spec in candidates.items():
-        search = RandomizedSearchCV(
-            estimator=spec["estimator"],
-            param_distributions=spec["params"],
-            n_iter=15,
-            cv=cv,
-            scoring="f1_macro",
-            random_state=42,
-            n_jobs=-1,
+    cls_results = (
+        pd.DataFrame(
+            [{"Model": name, "F1_macro": score} for name, score in cls_rows.items()]
         )
-        search.fit(Xc_train, yc_train)
-        best_models[name] = search.best_estimator_
-        cls_rows.append({"Model": name, "BestScore(f1_macro)": search.best_score_})
-
-    cls_results = pd.DataFrame(cls_rows).sort_values(
-        "BestScore(f1_macro)", ascending=False
-    ).reset_index(drop=True)
-
-    best_cls_name = cls_results.iloc[0]["Model"]
-    best_cls = best_models[best_cls_name]
+        .sort_values("F1_macro", ascending=False)
+        .reset_index(drop=True)
+    )
 
     yc_pred = best_cls.predict(Xc_test)
 
@@ -407,7 +385,6 @@ def prepare_model_data(df_new, df_old):
         "best_cls": best_cls,
         "yc_pred": yc_pred,
     }
-
 
 # -------------------------------------------------------------------
 # RAG Chatbot helpers (TF-IDF retrieval, lightweight)
