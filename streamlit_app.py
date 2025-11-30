@@ -144,7 +144,6 @@ This produced a fully enriched dataset that was ready for modelling.
         """
     )
 
-
 # -------------------------------------------------------------------
 # Data loading helper
 # -------------------------------------------------------------------
@@ -157,7 +156,7 @@ def load_csv_from_upload(uploaded):
 
 # -------------------------------------------------------------------
 # Main Modelling / FE helper
-#  -> simplified: train ONLY the best models directly
+# simplified: train ONLY the best models directly
 # -------------------------------------------------------------------
 @st.cache_data(show_spinner=True)
 def prepare_model_data(df_new, df_old):
