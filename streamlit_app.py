@@ -30,7 +30,6 @@ from sklearn.inspection import permutation_importance
 
 warnings.filterwarnings("ignore")
 
-# -------------------------------------------------------------------
 # Global residency thresholds (NO sliders anymore)
 # -------------------------------------------------------------------
 SHORT_THR = 3.0   # 0–3 days -> Vagrant
