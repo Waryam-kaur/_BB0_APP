@@ -382,15 +382,30 @@ def prepare_model_data(df_new, df_old):
         "best_cls": best_cls,
         "yc_pred": yc_pred,
     }
+
 # -------------------------------------------------------------------
-# RAG Chatbot helpers – super light, pure Python keyword retrieval
+# RAG Chatbot (based on RAG_Implementation.ipynb sample notebook)
 # -------------------------------------------------------------------
+# In the professor's Colab:
+#   - They create small "documents" (charity_info + transaction_narrative)
+#   - They implement retrieve_context(query, top_k) using embeddings
+#   - They implement rag_chatbot(query) that calls retrieve_context + LLM
+#
+# Here we follow the *same structure*, but use a lightweight
+# keyword-based retrieval so it runs safely on Streamlit Cloud.
 
 @st.cache_data
 def build_owl_documents(owl_df: pd.DataFrame):
     """
-    Turn each owl's stay info into a short text document.
-    This is the 'knowledge base' for the RAG chatbot.
+    STEP 1: BUILD DOCUMENTS  
+    (analogous to 'documents' dict in RAG_Implementation.ipynb)
+
+    In the Colab example, the professor builds two documents:
+        - doc1: charity_info
+        - doc2: transaction_narrative (from a DataFrame)
+
+    Here we do the same idea, but each document is a short narrative
+    about ONE owl's stay, detections, and residency type.
     """
     docs = []
     for _, row in owl_df.iterrows():
@@ -414,15 +429,23 @@ def build_owl_documents(owl_df: pd.DataFrame):
 
 def simple_retrieve_context(query: str, docs, top_k: int = 5) -> str:
     """
-    VERY LIGHT retrieval:
-    - lowercases the query
-    - counts how many query words appear in each document
-    - returns the top_k docs with highest match score
+    STEP 2: RETRIEVE CONTEXT  
+    (same role as retrieve_context(query, top_k) in the Colab)
+
+    Professor's notebook:
+        - encodes docs with SentenceTransformer
+        - uses cosine similarity to find the most similar docs
+
+    Here, to avoid heavy models on Streamlit Cloud, we implement a
+    *lightweight* retrieval:
+        - lowercase the query
+        - count how many query words appear in each document
+        - return the top_k matching documents as the context
     """
     if not docs or not query.strip():
         return ""
 
-    q_words = [w for w in query.lower().split() if len(w) > 2]  # ignore tiny words
+    q_words = [w for w in query.lower().split() if len(w) > 2]
     if not q_words:
         return ""
 
@@ -444,9 +467,12 @@ def simple_retrieve_context(query: str, docs, top_k: int = 5) -> str:
 
 def rag_chatbot_owl(query: str, docs):
     """
-    Simple RAG-style chatbot:
-    - uses keyword-based retrieval to find relevant owl docs
-    - generates a natural-language answer summarizing that context
+    STEP 3: RAG CHATBOT  
+    (same role as rag_chatbot(query) in RAG_Implementation.ipynb)
+
+    Pipeline:
+        1. Retrieve context using simple_retrieve_context
+        2. Generate a short natural-language answer based ONLY on that context
     """
     context = simple_retrieve_context(query, docs, top_k=5)
 
@@ -706,46 +732,54 @@ features most strongly influence**:
 This makes the model decisions more **transparent and actionable** for future research.
             """
         )
+      # -------------------------------------------------------------------
+# TAB 4: RAG Chatbot (follows RAG_Implementation.ipynb structure)
+# -------------------------------------------------------------------
+with tab_rag:
+    st.header("💬 RAG Chatbot – Ask Questions About Owl Residency")
 
-    # -------------------------------------------------------------------
-    # TAB 4: RAG Chatbot
-    # -------------------------------------------------------------------
-    with tab_rag:
-        st.header("💬 RAG Chatbot – Ask Questions About Owl Residency")
+    st.markdown(
+        """
+This chatbot follows the same **RAG pattern** as in the course Colab
+notebook `RAG_Implementation.ipynb`:
 
-        st.markdown(
-            """
-This chatbot uses a simple **Retrieval-Augmented Generation (RAG)** style approach:
+1. **Build documents** from data  
+   - In the notebook: `charity_info` and `transaction_narrative`  
+   - Here: one short narrative per owl (stay days, detections, residency).
 
-1. It converts each owl's stay information into a short text *document*.  
-2. For your question, it finds the most similar documents using **TF-IDF + cosine similarity**.  
-3. It then returns an answer based **only on that retrieved context**.
-            """
-        )
+2. **Retrieve context** for your question  
+   - In the notebook: `retrieve_context(query, top_k)` with embeddings.  
+   - Here: `simple_retrieve_context(query, docs, top_k)` using a light
+     keyword-based similarity (safer for Streamlit Cloud limits).
 
-        docs = build_owl_documents(owl_df)
+3. **Generate an answer** based only on the retrieved context  
+   - In the notebook: `rag_chatbot(query)` with FLAN-T5.  
+   - Here: `rag_chatbot_owl(query, docs)` which creates a concise,
+     rule-based answer.
 
-        if not docs:
-            st.warning("No documents were built from owl_df – check that stay_duration_days is available.")
+You can use this chatbot to explore owl stay duration, residency types
+(Vagrant / Migrant / Resident), and detection counts.
+        """
+    )
+
+    # Build knowledge base (documents) once from the owl-level dataset
+    docs = build_owl_documents(owl_df)
+
+    user_q = st.text_input(
+        "Type your question about owl stay duration, residency type, or detections:",
+        placeholder="e.g., Which owls stayed the longest, or what is a Resident owl?"
+    )
+
+    if st.button("Ask the RAG Chatbot"):
+        if not user_q.strip():
+            st.warning("Please enter a question first.")
+        elif not docs:
+            st.warning("No owl documents available yet.")
         else:
-            user_q = st.text_input(
-                "Type your question about owl stay duration, residency type, or detections:",
-                placeholder="e.g., Which owls stayed the longest, or what is a Resident owl?"
-            )
+            answer, used_context = rag_chatbot_owl(user_q, docs)
 
-            if st.button("Ask the RAG Chatbot"):
-                if not user_q.strip():
-                    st.warning("Please enter a question first.")
-                else:
-                    answer, used_context = rag_chatbot_owl(user_q, docs)
+            st.subheader("Chatbot Answer")
+            st.write(answer)
 
-                    st.markdown("### ✅ Answer")
-                    st.write(answer)
-
-                    st.markdown("### 🔎 Context used from the data")
-                    st.write(
-                        "Below are the owl records the chatbot used to answer your question "
-                        "(this is the 'retrieved' part of RAG):"
-                    )
-                    st.code(used_context)
-
+            with st.expander("Show retrieved context from owl data"):
+                st.markdown(f"```text\n{used_context}\n```")
