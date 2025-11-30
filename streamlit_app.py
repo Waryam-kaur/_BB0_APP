@@ -16,8 +16,6 @@ from sklearn.metrics import (
     mean_squared_error,
     classification_report,
     confusion_matrix,
-    accuracy_score,
-    f1_score,
 )
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.tree import DecisionTreeRegressor
@@ -42,7 +40,7 @@ LONG_THR = 7.0    # 3–7 days -> Migrant ; 7+ -> Resident
 # Streamlit page config
 # -------------------------------------------------------------------
 st.set_page_config(page_title="BBO Owl Migration App", layout="wide")
-st.title("🦉 BBO Owl Migration App" )
+st.title("🦉 BBO Owl Migration App ")
 
 # -------------------------------------------------------------------
 # Helper EDA functions (from your EDA notebook)
@@ -414,15 +412,13 @@ def prepare_model_data(df_new, df_old):
 
 
 # -------------------------------------------------------------------
-# RAG Chatbot helpers – lightweight, based on prof's RAG notebook idea
+# RAG Chatbot helpers – lightweight, safe
 # -------------------------------------------------------------------
-@st.cache_data
 def build_owl_documents(owl_df: pd.DataFrame):
     """
     Build short text 'documents' for each owl.
 
-    This version is VERY defensive: it handles NaNs / missing values
-    so that it never crashes when we click the chatbot button.
+    VERY defensive: handles NaNs / missing values so it never crashes.
     """
     docs = []
 
@@ -430,12 +426,10 @@ def build_owl_documents(owl_df: pd.DataFrame):
         return docs
 
     for _, row in owl_df.iterrows():
-        # stay duration is our main thing; skip if totally missing
         stay = row.get("stay_duration_days", np.nan)
         if pd.isna(stay):
             continue
 
-        # motusTagID
         motus_id = row.get("motusTagID", "Unknown")
         if pd.isna(motus_id):
             motus_str = "Unknown ID"
@@ -445,12 +439,10 @@ def build_owl_documents(owl_df: pd.DataFrame):
             except Exception:
                 motus_str = str(motus_id)
 
-        # residency type
         residency = row.get("ResidencyType_true", "Unknown")
         if pd.isna(residency):
             residency = "Unknown"
 
-        # detections
         detections = row.get("detections_count", np.nan)
         if pd.isna(detections):
             detections_str = "an unknown number of"
@@ -460,24 +452,33 @@ def build_owl_documents(owl_df: pd.DataFrame):
             except Exception:
                 detections_str = str(detections)
 
+        try:
+            stay_val = float(stay)
+        except Exception:
+            stay_val = np.nan
+
+        if np.isnan(stay_val):
+            stay_text = "an unknown number of"
+        else:
+            stay_text = f"{stay_val:.1f}"
+
         text = (
             f"Owl {motus_str} stayed at the station for about "
-            f"{float(stay):.1f} days, with {detections_str} detections, "
+            f"{stay_text} days, with {detections_str} detections, "
             f"and was categorized as a {residency}."
         )
 
         docs.append(text)
 
-    # (Optional) limit to first 300 docs to be extra safe
-    return docs[:300]
+    # limit to first 500 docs just in case
+    return docs[:500]
+
 
 def simple_retrieve_context(query: str, docs, top_k: int = 5) -> str:
     """
     Lightweight retrieval: keyword overlap between query and documents.
-    Same role as retrieve_context(query, top_k) in the Colab notebook,
-    but without heavy embedding models.
     """
-    if not docs or not query.strip():
+    if not docs or not isinstance(docs, (list, tuple)):
         return ""
 
     q_words = [w for w in query.lower().split() if len(w) > 2]
@@ -486,6 +487,8 @@ def simple_retrieve_context(query: str, docs, top_k: int = 5) -> str:
 
     scored = []
     for idx, text in enumerate(docs):
+        if not isinstance(text, str):
+            continue
         t = text.lower()
         score = sum(1 for w in q_words if w in t)
         if score > 0:
@@ -494,7 +497,7 @@ def simple_retrieve_context(query: str, docs, top_k: int = 5) -> str:
     if not scored:
         return ""
 
-    scored.sort(reverse=True)
+    scored.sort(key=lambda x: x[0], reverse=True)
     top_idx = [idx for score, idx in scored[:top_k]]
     top_texts = [docs[i] for i in top_idx]
     return "\n\n".join(top_texts)
@@ -519,7 +522,7 @@ def rag_chatbot_owl(query: str, docs):
             "Here is what I found in the owl residency data related to your question:\n\n"
             f"{context}\n\n"
             "This answer is based only on the detected stay duration, number of detections, "
-            "and residency category for each owl."
+            "and residency category for each owl, similar to the RAG idea from the lab notebook."
         )
 
     return answer, context
@@ -776,36 +779,40 @@ This makes the model decisions more **transparent and actionable** for future re
 
         st.markdown(
             """
-This chatbot follows the same **RAG pattern** as in the course Colab
-notebook `RAG_Implementation.ipynb`:
+This chatbot follows the same **RAG pattern** as in the provided Colab:
 
-1. Build short textual **documents** from data (one narrative per owl).  
-2. **Retrieve context** that best matches your question  
-   (here using a lightweight keyword-based similarity).  
-3. **Generate an answer** summarizing only that retrieved context.
+1. We turn each owl's stay information into a short **text document**.  
+2. For your question, we **retrieve** the most relevant documents using a simple
+   similarity measure (keyword overlap).  
+3. We then generate a **summary answer** based only on that retrieved context.
 
-Ask about stay duration, residency types (Vagrant / Migrant / Resident),
-or detection counts.
+Ask things like: *Which owls stayed the longest?*, or *What does a Resident owl look like in this data?*
             """
         )
 
         docs = build_owl_documents(owl_df)
+        st.caption(f"📄 Built {len(docs)} owl-level documents from the modelling dataset.")
 
         user_q = st.text_input(
             "Type your question about owl stay duration, residency type, or detections:",
-            placeholder="e.g., Which owls stayed the longest, or what is a Resident owl?",
+            placeholder="e.g., Which owls stayed the longest?",
         )
 
         if st.button("Ask the RAG Chatbot"):
-            if not user_q.strip():
-                st.warning("Please enter a question first.")
-            elif not docs:
-                st.warning("No owl documents available yet.")
-            else:
-                answer, used_context = rag_chatbot_owl(user_q, docs)
+            try:
+                if not user_q.strip():
+                    st.warning("Please enter a question first.")
+                elif not docs:
+                    st.warning("No owl documents available yet.")
+                else:
+                    answer, used_context = rag_chatbot_owl(user_q, docs)
 
-                st.subheader("Chatbot Answer")
-                st.write(answer)
+                    st.subheader("Chatbot Answer")
+                    st.write(answer)
 
-                with st.expander("Show retrieved context from owl data"):
-                    st.markdown(f"```text\n{used_context}\n```")
+                    with st.expander("Show retrieved context from owl data"):
+                        st.markdown(f"```text\n{used_context}\n```")
+            except Exception as e:
+                # This prevents the whole app from crashing – we show the error instead.
+                st.error("The RAG chatbot ran into an internal error. Here are the details:")
+                st.exception(e)
