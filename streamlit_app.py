@@ -419,10 +419,10 @@ def prepare_model_data(df_new, df_old):
 def load_rag_embedder():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
-
 @st.cache_resource
 def load_rag_generator():
-    return pipeline("text2text-generation", model="google/flan-t5-large")
+    # smaller model = less memory, safer on Streamlit Cloud
+    return pipeline("text2text-generation", model="google/flan-t5-small")
 
 
 @st.cache_data
@@ -486,7 +486,13 @@ def query_llm_with_context(query: str, context: str) -> str:
         "Answer:"
     )
 
-    output = generator(prompt, max_new_tokens=200, do_sample=True, temperature=0.7)
+    output = generator(
+    prompt,
+    max_new_tokens=80,     # fewer tokens -> less memory & faster
+    do_sample=False,       # simpler decoding
+    num_beams=2
+)
+
     return output[0]["generated_text"].strip()
 
 
