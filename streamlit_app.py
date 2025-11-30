@@ -414,118 +414,142 @@ def prepare_model_data(df_new, df_old):
 # -------------------------------------------------------------------
 # RAG Chatbot helpers – lightweight, safe
 # -------------------------------------------------------------------
-def build_owl_documents(owl_df: pd.DataFrame):
+@st.cache_data(show_spinner=False)
+def build_owl_documents_df(owl_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Build short text 'documents' for each owl.
+    Build a small text document per owl from the owl_df produced in prepare_model_data.
+    Returns a dataframe with columns:
+      - tag_id
+      - text
+      - stay_days
+      - residency_type
+      - detections_count
+    """
+    if owl_df is None or owl_df.empty:
+        return pd.DataFrame(columns=["tag_id", "text", "stay_days", "residency_type", "detections_count"])
 
-    VERY defensive: handles NaNs / missing values so it never crashes.
-    """
     docs = []
 
-    if owl_df is None or owl_df.empty:
-        return docs
-
     for _, row in owl_df.iterrows():
-        stay = row.get("stay_duration_days", np.nan)
-        if pd.isna(stay):
-            continue
-
-        motus_id = row.get("motusTagID", "Unknown")
-        if pd.isna(motus_id):
-            motus_str = "Unknown ID"
-        else:
-            try:
-                motus_str = str(int(motus_id))
-            except Exception:
-                motus_str = str(motus_id)
-
+        tag_id = row.get("motusTagID", "Unknown")
+        stay_days = row.get("stay_duration_days", np.nan)
         residency = row.get("ResidencyType_true", "Unknown")
-        if pd.isna(residency):
-            residency = "Unknown"
-
         detections = row.get("detections_count", np.nan)
-        if pd.isna(detections):
-            detections_str = "an unknown number of"
-        else:
-            try:
-                detections_str = str(int(detections))
-            except Exception:
-                detections_str = str(detections)
+
+        # clean up values
+        try:
+            tag_str = str(int(tag_id))
+        except Exception:
+            tag_str = str(tag_id)
 
         try:
-            stay_val = float(stay)
+            stay_val = float(stay_days)
         except Exception:
             stay_val = np.nan
 
-        if np.isnan(stay_val):
-            stay_text = "an unknown number of"
+        if pd.isna(stay_val):
+            stay_txt = "an unknown number of"
         else:
-            stay_text = f"{stay_val:.1f}"
+            stay_txt = f"{stay_val:.1f}"
+
+        if pd.isna(residency):
+            residency = "Unknown"
+
+        if pd.isna(detections):
+            det_txt = "an unknown number of"
+        else:
+            try:
+                det_txt = str(int(detections))
+            except Exception:
+                det_txt = str(detections)
 
         text = (
-            f"Owl {motus_str} stayed at the station for about "
-            f"{stay_text} days, with {detections_str} detections, "
-            f"and was categorized as a {residency}."
+            f"Owl {tag_str} stayed for about {stay_txt} days, "
+            f"had {det_txt} detections, and is classified as a {residency}."
         )
 
-        docs.append(text)
+        docs.append(
+            {
+                "tag_id": tag_str,
+                "text": text,
+                "stay_days": stay_val if not pd.isna(stay_val) else 0.0,
+                "residency_type": str(residency),
+                "detections_count": det_txt,
+            }
+        )
 
-    # limit to first 500 docs just in case
-    return docs[:500]
+    return pd.DataFrame(docs)
 
 
-def simple_retrieve_context(query: str, docs, top_k: int = 5) -> str:
+def simple_retrieval(question: str, docs_df: pd.DataFrame, top_k: int = 5) -> pd.DataFrame:
     """
-    Lightweight retrieval: keyword overlap between query and documents.
+    Very simple retrieval based on keyword overlap between the question
+    and the document text.
     """
-    if not docs or not isinstance(docs, (list, tuple)):
-        return ""
+    if docs_df is None or docs_df.empty:
+        return pd.DataFrame()
 
-    q_words = [w for w in query.lower().split() if len(w) > 2]
+    q_words = set(w for w in question.lower().split() if len(w) > 2)
     if not q_words:
-        return ""
+        docs_df = docs_df.copy()
+        docs_df["score"] = 0
+        return docs_df.head(0)
 
-    scored = []
-    for idx, text in enumerate(docs):
-        if not isinstance(text, str):
-            continue
-        t = text.lower()
-        score = sum(1 for w in q_words if w in t)
-        if score > 0:
-            scored.append((score, idx))
+    def score(text):
+        t_words = set(text.lower().split())
+        return len(q_words & t_words)
 
-    if not scored:
-        return ""
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top_idx = [idx for score, idx in scored[:top_k]]
-    top_texts = [docs[i] for i in top_idx]
-    return "\n\n".join(top_texts)
+    docs_df = docs_df.copy()
+    docs_df["score"] = docs_df["text"].apply(score)
+    docs_df = docs_df.sort_values("score", ascending=False)
+    return docs_df.head(top_k)
 
 
-def rag_chatbot_owl(query: str, docs):
+def rag_answer(question: str, docs_df: pd.DataFrame) -> str:
     """
-    Simple RAG-style chatbot:
-    1. Retrieve context using simple_retrieve_context
-    2. Generate answer summarizing that context
+    Generate a simple text answer based on the retrieved documents.
+    Includes a special case for 'longest stay' questions.
     """
-    context = simple_retrieve_context(query, docs, top_k=5)
+    q = question.lower()
 
-    if not context:
-        answer = (
-            "I couldn't find relevant information in the owl residency data "
-            "for that question. Try asking about stay duration, detections, "
-            "or residency types (Vagrant / Migrant / Resident)."
-        )
-    else:
-        answer = (
-            "Here is what I found in the owl residency data related to your question:\n\n"
-            f"{context}\n\n"
-            "This answer is based only on the detected stay duration, number of detections, "
-            "and residency category for each owl, similar to the RAG idea from the lab notebook."
+    # special case: "which owls stayed the longest"
+    if "longest" in q or "stayed the longest" in q or "most days" in q:
+        top = docs_df.sort_values("stay_days", ascending=False).head(3)
+        if top.empty:
+            return "I could not find any owls with stay durations in the data."
+
+        lines = []
+        for _, row in top.iterrows():
+            line = f"{row['tag_id']} (about {row['stay_days']:.1f} days, {row['residency_type']})"
+            lines.append(line)
+
+        return (
+            "The owls that stayed the longest in this dataset are:\n\n- "
+            + "\n- ".join(lines)
+            + "\n\nThese are based on total days stayed at the station."
         )
 
-    return answer, context
+    # default: keyword-based retrieval
+    top_docs = simple_retrieval(question, docs_df, top_k=5)
+    if top_docs.empty or top_docs["score"].max() == 0:
+        return (
+            "I couldn't find anything clearly related to your question in the owl residency data. "
+            "Try asking about stay duration, detections, or residency type (Vagrant, Migrant, Resident)."
+        )
+
+    lines = []
+    for _, row in top_docs.iterrows():
+        line = (
+            f"Owl {row['tag_id']} stayed about {row['stay_days']:.1f} days, "
+            f"had {row['detections_count']} detections, and is a {row['residency_type']}."
+        )
+        lines.append(line)
+
+    return (
+        "Here's what I found based on the most relevant owls:\n\n"
+        + "\n".join("- " + l for l in lines)
+        + "\n\nThis summary is based only on the retrieved residency records."
+    )
 
 
 # -------------------------------------------------------------------
@@ -779,19 +803,26 @@ This makes the model decisions more **transparent and actionable** for future re
 
         st.markdown(
             """
-This chatbot follows the same **RAG pattern** as in the provided Colab:
+This chatbot follows a **RAG-style pattern**, similar to the lab:
 
 1. We turn each owl's stay information into a short **text document**.  
 2. For your question, we **retrieve** the most relevant documents using a simple
    similarity measure (keyword overlap).  
 3. We then generate a **summary answer** based only on that retrieved context.
 
-Ask things like: *Which owls stayed the longest?*, or *What does a Resident owl look like in this data?*
+Try questions like:  
+- *Which owls stayed the longest?*  
+- *What does a Resident owl look like in this data?*
             """
         )
 
-        docs = build_owl_documents(owl_df)
-        st.caption(f"📄 Built {len(docs)} owl-level documents from the modelling dataset.")
+        try:
+            docs_df = build_owl_documents_df(owl_df)
+            st.caption(f"📄 Built {len(docs_df)} owl-level documents from the modelling dataset.")
+        except Exception as e:
+            st.error("Could not build owl documents for the RAG chatbot.")
+            st.exception(e)
+            docs_df = pd.DataFrame()
 
         user_q = st.text_input(
             "Type your question about owl stay duration, residency type, or detections:",
@@ -802,16 +833,24 @@ Ask things like: *Which owls stayed the longest?*, or *What does a Resident owl 
             try:
                 if not user_q.strip():
                     st.warning("Please enter a question first.")
-                elif not docs:
+                elif docs_df is None or docs_df.empty:
                     st.warning("No owl documents available yet.")
                 else:
-                    answer, used_context = rag_chatbot_owl(user_q, docs)
+                    answer = rag_answer(user_q, docs_df)
 
                     st.subheader("Chatbot Answer")
                     st.write(answer)
 
-                    with st.expander("Show retrieved context from owl data"):
-                        st.markdown(f"```text\n{used_context}\n```")
+                    with st.expander("🔍 View retrieved documents used for this answer"):
+                        retrieved = simple_retrieval(user_q, docs_df, top_k=5)
+                        if retrieved.empty:
+                            st.write("No specific documents were retrieved.")
+                        else:
+                            for _, row in retrieved.iterrows():
+                                st.markdown(
+                                    f"- **Owl {row['tag_id']}** – {row['text']} "
+                                    f"(stay ~{row['stay_days']:.1f} days, {row['residency_type']})"
+                                )
             except Exception as e:
                 # This prevents the whole app from crashing – we show the error instead.
                 st.error("The RAG chatbot ran into an internal error. Here are the details:")
