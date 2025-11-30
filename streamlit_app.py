@@ -411,17 +411,15 @@ def prepare_model_data(df_new, df_old):
     }
 
 
-# -------------------------------------------------------------------
-# RAG Chatbot helpers (uses owl_df as the knowledge base)
-# -------------------------------------------------------------------
 
-@st.cache_resource
-def load_rag_embedder():
-    return SentenceTransformer("all-MiniLM-L6-v2")
+
+# -------------------------------------------------------------------
+# RAG Chatbot helpers (TF-IDF retrieval + FLAN-T5 generator)
+# -------------------------------------------------------------------
 
 @st.cache_resource
 def load_rag_generator():
-    # smaller model = less memory, safer on Streamlit Cloud
+    # small model so that it fits in Streamlit Cloud memory
     return pipeline("text2text-generation", model="google/flan-t5-small")
 
 
@@ -451,22 +449,34 @@ def build_owl_documents(owl_df: pd.DataFrame):
     return docs
 
 
+@st.cache_resource
+def build_tfidf_index(docs):
+    """
+    Build a TF-IDF index over the documents.
+    Much lighter than SentenceTransformer embeddings.
+    """
+    vectorizer = TfidfVectorizer(stop_words="english")
+    doc_matrix = vectorizer.fit_transform(docs)
+    return vectorizer, doc_matrix
+
+
 def retrieve_context_owl(query: str, docs, top_k: int = 3) -> str:
     """
-    Simple retrieval: compute similarity between the query and each doc,
-    then return the top_k most similar texts as context.
+    Retrieve the top-k most similar documents using TF-IDF + cosine similarity.
     """
-    embedder = load_rag_embedder()
-    query_emb = embedder.encode(query, convert_to_tensor=True)
+    if not docs:
+        return ""
 
-    scored_docs = []
-    for text in docs:
-        doc_emb = embedder.encode(text, convert_to_tensor=True)
-        score = util.pytorch_cos_sim(query_emb, doc_emb).item()
-        scored_docs.append((score, text))
+    vectorizer, doc_matrix = build_tfidf_index(docs)
+    query_vec = vectorizer.transform([query])
+    sims = cosine_similarity(query_vec, doc_matrix)[0]
 
-    scored_docs.sort(reverse=True, key=lambda x: x[0])
-    top_texts = [t for _, t in scored_docs[:top_k]]
+    # indices of docs sorted by similarity (largest first)
+    top_idx = sims.argsort()[::-1][:top_k]
+    top_texts = [docs[i] for i in top_idx if sims[i] > 0]
+
+    if not top_texts:
+        return ""
 
     return "\n\n".join(top_texts)
 
@@ -476,6 +486,9 @@ def query_llm_with_context(query: str, context: str) -> str:
     Ask the FLAN-T5 model to answer using only the provided context.
     """
     generator = load_rag_generator()
+
+    if not context.strip():
+        return "I’m not sure – I couldn’t find information in the data for this question."
 
     prompt = (
         "You are helping biologists understand owl migration data. "
@@ -487,12 +500,11 @@ def query_llm_with_context(query: str, context: str) -> str:
     )
 
     output = generator(
-    prompt,
-    max_new_tokens=80,     # fewer tokens -> less memory & faster
-    do_sample=False,       # simpler decoding
-    num_beams=2
-)
-
+        prompt,
+        max_new_tokens=80,   # keep it small for Cloud
+        do_sample=False,
+        num_beams=2,
+    )
     return output[0]["generated_text"].strip()
 
 
