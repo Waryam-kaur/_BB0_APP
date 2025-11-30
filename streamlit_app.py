@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
 
-from sklearn.model_selection import train_test_split, StratifiedKFold, RandomizedSearchCV
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.impute import SimpleImputer
@@ -16,6 +16,7 @@ from sklearn.metrics import (
     mean_squared_error,
     classification_report,
     confusion_matrix,
+    f1_score,
 )
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.tree import DecisionTreeRegressor
@@ -23,9 +24,8 @@ from sklearn.ensemble import (
     RandomForestRegressor,
     GradientBoostingRegressor,
     RandomForestClassifier,
-    GradientBoostingClassifier,
 )
-from sklearn.svm import SVR, SVC
+from sklearn.svm import SVR
 from sklearn.inspection import permutation_importance
 
 warnings.filterwarnings("ignore")
@@ -158,10 +158,11 @@ def load_csv_from_upload(uploaded):
 
 # -------------------------------------------------------------------
 # Main Modelling / FE helper
+#  -> simplified: train ONLY the best models directly
 # -------------------------------------------------------------------
 @st.cache_data(show_spinner=True)
 def prepare_model_data(df_new, df_old):
-    """Replicates your modelling notebook steps, returns many useful objects."""
+    """Replicates your modelling notebook steps, but trains only the final best models (lighter)."""
 
     df = df_new.copy()
 
@@ -283,31 +284,16 @@ def prepare_model_data(df_new, df_old):
         X_imp, y_reg, test_size=0.2, random_state=42
     )
 
-    # 9) Regression models
-    reg_models = {
-        "LinearRegression": LinearRegression(),
-        "DecisionTree": DecisionTreeRegressor(max_depth=6, random_state=42),
-        "GradientBoosting": GradientBoostingRegressor(
-            n_estimators=300, learning_rate=0.05, max_depth=4, random_state=42
-        ),
-        "SVR": make_pipeline(StandardScaler(), SVR(kernel="rbf", C=2.0, epsilon=0.2)),
-        "RandomForest": RandomForestRegressor(n_estimators=400, random_state=42, n_jobs=-1),
-    }
-
-    rows = []
-    pred_store_reg = {}
-
-    for name, model in reg_models.items():
-        model.fit(X_train, y_train)
-        pred = model.predict(X_test)
-        r2 = r2_score(y_test, pred)
-        rmse = np.sqrt(mean_squared_error(y_test, pred))
-        rows.append({"Model": name, "R2": r2, "RMSE": rmse})
-        pred_store_reg[name] = pred
-
-    reg_results = pd.DataFrame(rows).sort_values("R2", ascending=False).reset_index(drop=True)
-    best_reg_name = reg_results.iloc[0]["Model"]
-    best_reg = reg_models[best_reg_name]
+    # 9) Regression – train ONLY the best model (GradientBoosting)
+    best_reg_name = "GradientBoosting"
+    best_reg = GradientBoostingRegressor(
+        n_estimators=300, learning_rate=0.05, max_depth=4, random_state=42
+    )
+    best_reg.fit(X_train, y_train)
+    best_pred_test = best_reg.predict(X_test)
+    r2 = r2_score(y_test, best_pred_test)
+    rmse = np.sqrt(mean_squared_error(y_test, best_pred_test))
+    reg_results = pd.DataFrame([{"Model": best_reg_name, "R2": r2, "RMSE": rmse}])
 
     # Train on full data and store predictions
     best_reg.fit(X_imp, y_reg)
@@ -323,69 +309,21 @@ def prepare_model_data(df_new, df_old):
         X_imp, y_cls_enc, test_size=0.2, random_state=42, stratify=y_cls_enc
     )
 
-    # Candidate classifiers with small hyperparameter grids (like notebook)
-    candidates = {
-        "LogReg": {
-            "estimator": Pipeline(
-                [("scaler", StandardScaler(with_mean=False)),
-                 ("clf", LogisticRegression(max_iter=3000, class_weight="balanced"))]
-            ),
-            "params": {"clf__C": np.logspace(-2, 2, 12), "clf__solver": ["lbfgs", "liblinear"]},
-        },
-        "SVC": {
-            "estimator": Pipeline(
-                [("scaler", StandardScaler(with_mean=False)),
-                 ("clf", SVC(class_weight="balanced"))]
-            ),
-            "params": {
-                "clf__C": np.logspace(-2, 2, 12),
-                "clf__gamma": ["scale", "auto"],
-            },
-        },
-        "RandomForest": {
-            "estimator": RandomForestClassifier(class_weight="balanced_subsample", random_state=42),
-            "params": {
-                "n_estimators": [200, 400, 800],
-                "max_depth": [None, 6, 12, 20],
-            },
-        },
-        "GradientBoosting": {
-            "estimator": GradientBoostingClassifier(random_state=42),
-            "params": {
-                "n_estimators": [100, 200, 300],
-                "learning_rate": [0.05, 0.1, 0.2],
-                "max_depth": [2, 3, 4],
-            },
-        },
-    }
-
-    best_models = {}
-    cls_rows = []
-
-    cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
-
-    for name, spec in candidates.items():
-        search = RandomizedSearchCV(
-            estimator=spec["estimator"],
-            param_distributions=spec["params"],
-            n_iter=15,
-            cv=cv,
-            scoring="f1_macro",
-            random_state=42,
-            n_jobs=-1,
-        )
-        search.fit(Xc_train, yc_train)
-        best_models[name] = search.best_estimator_
-        cls_rows.append({"Model": name, "BestScore(f1_macro)": search.best_score_})
-
-    cls_results = pd.DataFrame(cls_rows).sort_values(
-        "BestScore(f1_macro)", ascending=False
-    ).reset_index(drop=True)
-
-    best_cls_name = cls_results.iloc[0]["Model"]
-    best_cls = best_models[best_cls_name]
-
+    # classification – train ONLY one RandomForest (no CV)
+    best_cls_name = "RandomForestClassifier"
+    best_cls = RandomForestClassifier(
+        n_estimators=200,
+        max_depth=12,
+        class_weight="balanced_subsample",
+        random_state=42,
+        n_jobs=-1,
+    )
+    best_cls.fit(Xc_train, yc_train)
     yc_pred = best_cls.predict(Xc_test)
+    f1 = f1_score(yc_test, yc_pred, average="macro")
+    cls_results = pd.DataFrame(
+        [{"Model": best_cls_name, "BestScore(f1_macro)": f1}]
+    )
 
     return {
         "df_det": df,  # detection-level with DATETIME + hour
@@ -398,7 +336,7 @@ def prepare_model_data(df_new, df_old):
         "reg_results": reg_results,
         "best_reg_name": best_reg_name,
         "best_reg": best_reg,
-        "best_reg_pred_test": pred_store_reg[best_reg_name],
+        "best_reg_pred_test": best_pred_test,
         "Xc_train": Xc_train,
         "Xc_test": Xc_test,
         "yc_train": yc_train,
@@ -412,7 +350,7 @@ def prepare_model_data(df_new, df_old):
 
 
 # -------------------------------------------------------------------
-# RAG Chatbot helpers – ultra simple, no caching
+# RAG Chatbot helpers – ultra simple
 # -------------------------------------------------------------------
 def build_owl_documents_df(owl_df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -680,7 +618,7 @@ else:
         )
         ax_cm.set_xlabel("Predicted")
         ax_cm.set_ylabel("True")
-        ax_cm.setTitle = ("Confusion Matrix — " + best_cls_name)
+        ax_cm.set_title(f"Confusion Matrix — {best_cls_name}")
         st.pyplot(fig_cm)
 
         # Extra modelling visualizations (from your notebook)
@@ -737,7 +675,7 @@ else:
         best_reg = data_dict["best_reg"]
 
         perm_reg = permutation_importance(
-            best_reg, X_test, y_test, n_repeats=20, random_state=42, n_jobs=-1
+            best_reg, X_test, y_test, n_repeats=5, random_state=42, n_jobs=-1
         )
         reg_imp = pd.DataFrame(
             {"feature": X_test.columns, "importance": perm_reg.importances_mean}
@@ -759,7 +697,7 @@ else:
         best_cls = data_dict["best_cls"]
 
         perm_cls = permutation_importance(
-            best_cls, Xc_test, yc_test, n_repeats=20, random_state=42, n_jobs=-1
+            best_cls, Xc_test, yc_test, n_repeats=5, random_state=42, n_jobs=-1
         )
         cls_imp = pd.DataFrame(
             {"feature": Xc_test.columns, "importance": perm_cls.importances_mean}
@@ -845,5 +783,5 @@ Try questions like:
                                         f"(stay ~{row['stay_days']:.1f} days, {row['residency_type']})"
                                     )
             except Exception as e:
-                st.error("The RAG chatbot ran into an internal error (inside the app, not system).")
+                st.error("The RAG chatbot ran into an internal error (inside the app).")
                 st.exception(e)
