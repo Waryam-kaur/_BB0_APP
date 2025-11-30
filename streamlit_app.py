@@ -155,7 +155,7 @@ def load_csv_from_upload(uploaded):
         return None
     return pd.read_csv(uploaded, low_memory=False)
 
-
+@st.cache_data(show_spinner=True)
 def prepare_model_data(df_new, df_old):
     """Replicates your modelling notebook steps, returns many useful objects."""
     df = df_new.copy()
