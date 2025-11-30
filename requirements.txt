@@ -5,3 +5,6 @@ scikit-learn
 matplotlib
 seaborn
 shap
+sentence-transformers
+transformers
+
