@@ -1,3 +1,5 @@
+# streamlit_app.py
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -14,7 +16,8 @@ from sklearn.metrics import (
     mean_squared_error,
     classification_report,
     confusion_matrix,
-    f1_score
+    accuracy_score,
+    f1_score,
 )
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.tree import DecisionTreeRegressor
@@ -27,11 +30,10 @@ from sklearn.ensemble import (
 from sklearn.svm import SVR, SVC
 from sklearn.inspection import permutation_importance
 
-
 warnings.filterwarnings("ignore")
 
 # -------------------------------------------------------------------
-# Global residency thresholds
+# Global residency thresholds (NO sliders anymore)
 # -------------------------------------------------------------------
 SHORT_THR = 3.0   # 0–3 days -> Vagrant
 LONG_THR = 7.0    # 3–7 days -> Migrant ; 7+ -> Resident
@@ -43,7 +45,7 @@ st.set_page_config(page_title="BBO Owl Migration App", layout="wide")
 st.title("🦉 BBO Owl Migration App (EDA + FE + Modeling + XAI + RAG Chatbot)")
 
 # -------------------------------------------------------------------
-# Helper EDA functions
+# Helper EDA functions (from your EDA notebook)
 # -------------------------------------------------------------------
 def plot_detections_per_owl(df_det):
     st.subheader("1. Detections per Owl (motusTagID)")
@@ -75,6 +77,7 @@ def cap_outliers_iqr(df, col):
 def plot_before_after_boxplots(df_det):
     st.subheader("2. Outlier Capping (Before vs After)")
 
+    # numeric signal columns used in the notebook
     signal_cols = ["snr", "sig", "sigsd", "noise", "freq", "freqsd", "burstSlop", "slop"]
     cols_present = [c for c in signal_cols if c in df_det.columns]
 
@@ -82,6 +85,7 @@ def plot_before_after_boxplots(df_det):
         st.warning("No numeric signal columns found for outlier capping plots.")
         return
 
+    # To keep it readable, just show for snr and sig if they exist, else first two
     if "snr" in cols_present and "sig" in cols_present:
         cols_to_show = ["snr", "sig"]
     else:
@@ -145,7 +149,7 @@ This produced a fully enriched dataset that was ready for modelling.
 
 
 # -------------------------------------------------------------------
-# Main Modelling / FE helper
+# Data loading helper
 # -------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def load_csv_from_upload(uploaded):
@@ -153,9 +157,13 @@ def load_csv_from_upload(uploaded):
         return None
     return pd.read_csv(uploaded, low_memory=False)
 
+
+# -------------------------------------------------------------------
+# Main Modelling / FE helper
+# -------------------------------------------------------------------
 @st.cache_data(show_spinner=True)
 def prepare_model_data(df_new, df_old):
-    """Feature engineering + LIGHT modelling (no RandomizedSearchCV)."""
+    """Replicates your modelling notebook steps, returns many useful objects."""
 
     df = df_new.copy()
 
@@ -171,6 +179,7 @@ def prepare_model_data(df_new, df_old):
     df["motusTagID"] = pd.to_numeric(df["motusTagID"], errors="coerce")
 
     # 2) Build DATETIME
+    df = df.copy()
     if "DATETIME" in df.columns:
         df["DATETIME"] = pd.to_datetime(df["DATETIME"], errors="coerce")
     else:
@@ -187,7 +196,7 @@ def prepare_model_data(df_new, df_old):
 
         df["DATETIME"] = df["DATE"] + df["TIME_clean"]
 
-    # hour-of-day feature
+    # hour-of-day feature for later EDA
     df["hour"] = df["DATETIME"].dt.hour
 
     # 3) True stay duration (days) per owl
@@ -232,6 +241,7 @@ def prepare_model_data(df_new, df_old):
 
     # 5) Old metadata (one row per owl)
     df_old_local = df_old.copy()
+
     old_id_candidates = [
         c
         for c in df_old_local.columns
@@ -260,7 +270,7 @@ def prepare_model_data(df_new, df_old):
         owl_df["stay_duration_days"], bins=bins, labels=labels, include_lowest=True
     )
 
-    # ---------------- REGRESSION ----------------
+    # 8) Regression features
     y_reg = owl_df["stay_duration_days"]
     drop_cols = ["motusTagID", "stay_duration_days", "ResidencyType_true"]
     X_reg = owl_df.drop(columns=[c for c in drop_cols if c in owl_df.columns])
@@ -275,17 +285,18 @@ def prepare_model_data(df_new, df_old):
         X_imp, y_reg, test_size=0.2, random_state=42
     )
 
+    # 9) Regression models
     reg_models = {
         "LinearRegression": LinearRegression(),
         "DecisionTree": DecisionTreeRegressor(max_depth=6, random_state=42),
         "GradientBoosting": GradientBoostingRegressor(
-            n_estimators=200, learning_rate=0.05, max_depth=4, random_state=42
+            n_estimators=300, learning_rate=0.05, max_depth=4, random_state=42
         ),
-        "SVR": make_pipeline(StandardScaler(), SVR(kernel="rbf", C=1.0, epsilon=0.2)),
-        "RandomForest": RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1),
+        "SVR": make_pipeline(StandardScaler(), SVR(kernel="rbf", C=2.0, epsilon=0.2)),
+        "RandomForest": RandomForestRegressor(n_estimators=400, random_state=42, n_jobs=-1),
     }
 
-    reg_rows = []
+    rows = []
     pred_store_reg = {}
 
     for name, model in reg_models.items():
@@ -293,10 +304,10 @@ def prepare_model_data(df_new, df_old):
         pred = model.predict(X_test)
         r2 = r2_score(y_test, pred)
         rmse = np.sqrt(mean_squared_error(y_test, pred))
-        reg_rows.append({"Model": name, "R2": r2, "RMSE": rmse})
+        rows.append({"Model": name, "R2": r2, "RMSE": rmse})
         pred_store_reg[name] = pred
 
-    reg_results = pd.DataFrame(reg_rows).sort_values("R2", ascending=False).reset_index(drop=True)
+    reg_results = pd.DataFrame(rows).sort_values("R2", ascending=False).reset_index(drop=True)
     best_reg_name = reg_results.iloc[0]["Model"]
     best_reg = reg_models[best_reg_name]
 
@@ -305,7 +316,7 @@ def prepare_model_data(df_new, df_old):
     best_pred_full = best_reg.predict(X_imp)
     owl_df["predicted_stay_days"] = best_pred_full
 
-    # ---------------- CLASSIFICATION ----------------
+    # 10) Classification (ResidencyType_true)
     y_cls = owl_df["ResidencyType_true"].astype(str)
     le = LabelEncoder()
     y_cls_enc = le.fit_transform(y_cls)
@@ -314,54 +325,72 @@ def prepare_model_data(df_new, df_old):
         X_imp, y_cls_enc, test_size=0.2, random_state=42, stratify=y_cls_enc
     )
 
-    cls_models = {
-        "LogReg": Pipeline(
-            [
-                ("scaler", StandardScaler(with_mean=False)),
-                ("clf", LogisticRegression(max_iter=2000, class_weight="balanced")),
-            ]
-        ),
-        "SVC": Pipeline(
-            [
-                ("scaler", StandardScaler(with_mean=False)),
-                ("clf", SVC(class_weight="balanced", C=1.0, gamma="scale")),
-            ]
-        ),
-        "RandomForest": RandomForestClassifier(
-            class_weight="balanced_subsample", random_state=42, n_estimators=200, max_depth=None
-        ),
-        "GradientBoosting": GradientBoostingClassifier(
-            random_state=42, n_estimators=150, learning_rate=0.1, max_depth=3
-        ),
+    # Candidate classifiers with small hyperparameter grids (like notebook)
+    candidates = {
+        "LogReg": {
+            "estimator": Pipeline(
+                [("scaler", StandardScaler(with_mean=False)),
+                 ("clf", LogisticRegression(max_iter=3000, class_weight="balanced"))]
+            ),
+            "params": {"clf__C": np.logspace(-2, 2, 12), "clf__solver": ["lbfgs", "liblinear"]},
+        },
+        "SVC": {
+            "estimator": Pipeline(
+                [("scaler", StandardScaler(with_mean=False)),
+                 ("clf", SVC(class_weight="balanced"))]
+            ),
+            "params": {
+                "clf__C": np.logspace(-2, 2, 12),
+                "clf__gamma": ["scale", "auto"],
+            },
+        },
+        "RandomForest": {
+            "estimator": RandomForestClassifier(class_weight="balanced_subsample", random_state=42),
+            "params": {
+                "n_estimators": [200, 400, 800],
+                "max_depth": [None, 6, 12, 20],
+            },
+        },
+        "GradientBoosting": {
+            "estimator": GradientBoostingClassifier(random_state=42),
+            "params": {
+                "n_estimators": [100, 200, 300],
+                "learning_rate": [0.05, 0.1, 0.2],
+                "max_depth": [2, 3, 4],
+            },
+        },
     }
 
-    cls_rows = {}
-    best_cls = None
-    best_cls_name = None
-    best_f1 = -1.0
+    best_models = {}
+    cls_rows = []
 
-    for name, model in cls_models.items():
-        model.fit(Xc_train, yc_train)
-        preds = model.predict(Xc_test)
-        f1 = f1_score(yc_test, preds, average="macro")
-        cls_rows[name] = f1
-        if f1 > best_f1:
-            best_f1 = f1
-            best_cls = model
-            best_cls_name = name
+    cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
 
-    cls_results = (
-        pd.DataFrame(
-            [{"Model": name, "F1_macro": score} for name, score in cls_rows.items()]
+    for name, spec in candidates.items():
+        search = RandomizedSearchCV(
+            estimator=spec["estimator"],
+            param_distributions=spec["params"],
+            n_iter=15,
+            cv=cv,
+            scoring="f1_macro",
+            random_state=42,
+            n_jobs=-1,
         )
-        .sort_values("F1_macro", ascending=False)
-        .reset_index(drop=True)
-    )
+        search.fit(Xc_train, yc_train)
+        best_models[name] = search.best_estimator_
+        cls_rows.append({"Model": name, "BestScore(f1_macro)": search.best_score_})
+
+    cls_results = pd.DataFrame(cls_rows).sort_values(
+        "BestScore(f1_macro)", ascending=False
+    ).reset_index(drop=True)
+
+    best_cls_name = cls_results.iloc[0]["Model"]
+    best_cls = best_models[best_cls_name]
 
     yc_pred = best_cls.predict(Xc_test)
 
     return {
-        "df_det": df,
+        "df_det": df,  # detection-level with DATETIME + hour
         "owl_df": owl_df,
         "X_imp": X_imp,
         "X_train": X_train,
@@ -383,29 +412,15 @@ def prepare_model_data(df_new, df_old):
         "yc_pred": yc_pred,
     }
 
-# -------------------------------------------------------------------
-# RAG Chatbot (based on RAG_Implementation.ipynb sample notebook)
-# -------------------------------------------------------------------
-# In the professor's Colab:
-#   - They create small "documents" (charity_info + transaction_narrative)
-#   - They implement retrieve_context(query, top_k) using embeddings
-#   - They implement rag_chatbot(query) that calls retrieve_context + LLM
-#
-# Here we follow the *same structure*, but use a lightweight
-# keyword-based retrieval so it runs safely on Streamlit Cloud.
 
+# -------------------------------------------------------------------
+# RAG Chatbot helpers – lightweight, based on prof's RAG notebook idea
+# -------------------------------------------------------------------
 @st.cache_data
 def build_owl_documents(owl_df: pd.DataFrame):
     """
-    STEP 1: BUILD DOCUMENTS  
-    (analogous to 'documents' dict in RAG_Implementation.ipynb)
-
-    In the Colab example, the professor builds two documents:
-        - doc1: charity_info
-        - doc2: transaction_narrative (from a DataFrame)
-
-    Here we do the same idea, but each document is a short narrative
-    about ONE owl's stay, detections, and residency type.
+    Build short text 'documents' for each owl.
+    Analogy to documents dict in RAG_Implementation.ipynb.
     """
     docs = []
     for _, row in owl_df.iterrows():
@@ -429,18 +444,9 @@ def build_owl_documents(owl_df: pd.DataFrame):
 
 def simple_retrieve_context(query: str, docs, top_k: int = 5) -> str:
     """
-    STEP 2: RETRIEVE CONTEXT  
-    (same role as retrieve_context(query, top_k) in the Colab)
-
-    Professor's notebook:
-        - encodes docs with SentenceTransformer
-        - uses cosine similarity to find the most similar docs
-
-    Here, to avoid heavy models on Streamlit Cloud, we implement a
-    *lightweight* retrieval:
-        - lowercase the query
-        - count how many query words appear in each document
-        - return the top_k matching documents as the context
+    Lightweight retrieval: keyword overlap between query and documents.
+    Same role as retrieve_context(query, top_k) in the Colab notebook,
+    but without heavy embedding models.
     """
     if not docs or not query.strip():
         return ""
@@ -459,7 +465,7 @@ def simple_retrieve_context(query: str, docs, top_k: int = 5) -> str:
     if not scored:
         return ""
 
-    scored.sort(reverse=True)  # highest score first
+    scored.sort(reverse=True)
     top_idx = [idx for score, idx in scored[:top_k]]
     top_texts = [docs[i] for i in top_idx]
     return "\n\n".join(top_texts)
@@ -467,12 +473,9 @@ def simple_retrieve_context(query: str, docs, top_k: int = 5) -> str:
 
 def rag_chatbot_owl(query: str, docs):
     """
-    STEP 3: RAG CHATBOT  
-    (same role as rag_chatbot(query) in RAG_Implementation.ipynb)
-
-    Pipeline:
-        1. Retrieve context using simple_retrieve_context
-        2. Generate a short natural-language answer based ONLY on that context
+    Simple RAG-style chatbot:
+    1. Retrieve context using simple_retrieve_context
+    2. Generate answer summarizing that context
     """
     context = simple_retrieve_context(query, docs, top_k=5)
 
@@ -492,8 +495,9 @@ def rag_chatbot_owl(query: str, docs):
 
     return answer, context
 
+
 # -------------------------------------------------------------------
-# Sidebar – file upload
+# Sidebar – file upload ONLY
 # -------------------------------------------------------------------
 st.sidebar.header("1) Upload data")
 
@@ -517,7 +521,7 @@ st.sidebar.write(f"- {LONG_THR}+ days → **Resident**")
 # Main logic
 # -------------------------------------------------------------------
 if (combined_file is None) or (old_meta_file is None):
-    st.info("Please upload **both** CSV files in the sidebar to see EDA, modelling, XAI, and the RAG chatbot.")
+    st.info(" Please upload **both** CSV files in the sidebar to see EDA, modelling, XAI, and the RAG chatbot.")
 else:
     df_new = load_csv_from_upload(combined_file)
     df_old = load_csv_from_upload(old_meta_file)
@@ -533,30 +537,15 @@ else:
         st.write(df_old.head())
         st.write(f"Shape: {df_old.shape}")
 
-        data_dict = prepare_model_data(df_new, df_old)
+    # Prepare datasets & models (cached)
+    data_dict = prepare_model_data(df_new, df_old)
 
     df_det = data_dict["df_det"]
     owl_df = data_dict["owl_df"]
 
     # Tabs: EDA, Modelling, XAI, RAG
     tab_eda, tab_model, tab_xai, tab_rag = st.tabs(
-        [
-            "📊 EDA & Feature Engineering",
-            "🤖 Modelling & Results",
-            "🔍 XAI",
-            "💬 RAG Chatbot",
-        ]
-    )
-
-    # -------------------------------------------------------------------
-    # TAB 1: EDA & Feature Engineering
-    # -------------------------------------------------------------------
-    with tab_eda:
-        st.header("Exploratory Data Analysis (New MOTUS Detections)")
-        ...
-
-
-
+        ["📊 EDA & Feature Engineering", "🤖 Modelling & Results", "🔍 XAI", "💬 RAG Chatbot"]
     )
 
     # -------------------------------------------------------------------
@@ -644,7 +633,7 @@ else:
         ax_cm.set_title(f"Confusion Matrix — {best_cls_name}")
         st.pyplot(fig_cm)
 
-        # Extra modelling visualizations
+        # Extra modelling visualizations (from your notebook)
         st.subheader("5. Top 15 Owls by Number of Days Stayed")
         top15 = owl_df.sort_values("stay_duration_days", ascending=False).head(15)
         fig_top, ax_top = plt.subplots(figsize=(10, 4))
@@ -655,6 +644,7 @@ else:
         plt.xticks(rotation=45, ha="right")
         st.pyplot(fig_top)
 
+        # Hour-of-day activity histogram
         st.subheader("6. What Time of Day Owls Are Most Active")
         if "hour" in df_det.columns:
             fig_hr, ax_hr = plt.subplots(figsize=(9, 4))
@@ -666,6 +656,7 @@ else:
         else:
             st.warning("`hour` column missing from detection-level data; cannot plot hourly activity.")
 
+        # Daily owl activity line plot
         st.subheader("7. Daily Owl Activity at the Station")
         if "DATETIME" in df_det.columns:
             df_det["date_only"] = df_det["DATETIME"].dt.date
@@ -747,54 +738,45 @@ features most strongly influence**:
 This makes the model decisions more **transparent and actionable** for future research.
             """
         )
-      # -------------------------------------------------------------------
-# TAB 4: RAG Chatbot (follows RAG_Implementation.ipynb structure)
-# -------------------------------------------------------------------
-with tab_rag:
-    st.header("💬 RAG Chatbot – Ask Questions About Owl Residency")
 
-    st.markdown(
-        """
+    # -------------------------------------------------------------------
+    # TAB 4: RAG Chatbot
+    # -------------------------------------------------------------------
+    with tab_rag:
+        st.header("💬 RAG Chatbot – Ask Questions About Owl Residency")
+
+        st.markdown(
+            """
 This chatbot follows the same **RAG pattern** as in the course Colab
 notebook `RAG_Implementation.ipynb`:
 
-1. **Build documents** from data  
-   - In the notebook: `charity_info` and `transaction_narrative`  
-   - Here: one short narrative per owl (stay days, detections, residency).
+1. Build short textual **documents** from data (one narrative per owl).  
+2. **Retrieve context** that best matches your question  
+   (here using a lightweight keyword-based similarity).  
+3. **Generate an answer** summarizing only that retrieved context.
 
-2. **Retrieve context** for your question  
-   - In the notebook: `retrieve_context(query, top_k)` with embeddings.  
-   - Here: `simple_retrieve_context(query, docs, top_k)` using a light
-     keyword-based similarity (safer for Streamlit Cloud limits).
+Ask about stay duration, residency types (Vagrant / Migrant / Resident),
+or detection counts.
+            """
+        )
 
-3. **Generate an answer** based only on the retrieved context  
-   - In the notebook: `rag_chatbot(query)` with FLAN-T5.  
-   - Here: `rag_chatbot_owl(query, docs)` which creates a concise,
-     rule-based answer.
+        docs = build_owl_documents(owl_df)
 
-You can use this chatbot to explore owl stay duration, residency types
-(Vagrant / Migrant / Resident), and detection counts.
-        """
-    )
+        user_q = st.text_input(
+            "Type your question about owl stay duration, residency type, or detections:",
+            placeholder="e.g., Which owls stayed the longest, or what is a Resident owl?",
+        )
 
-    # Build knowledge base (documents) once from the owl-level dataset
-    docs = build_owl_documents(owl_df)
+        if st.button("Ask the RAG Chatbot"):
+            if not user_q.strip():
+                st.warning("Please enter a question first.")
+            elif not docs:
+                st.warning("No owl documents available yet.")
+            else:
+                answer, used_context = rag_chatbot_owl(user_q, docs)
 
-    user_q = st.text_input(
-        "Type your question about owl stay duration, residency type, or detections:",
-        placeholder="e.g., Which owls stayed the longest, or what is a Resident owl?"
-    )
+                st.subheader("Chatbot Answer")
+                st.write(answer)
 
-    if st.button("Ask the RAG Chatbot"):
-        if not user_q.strip():
-            st.warning("Please enter a question first.")
-        elif not docs:
-            st.warning("No owl documents available yet.")
-        else:
-            answer, used_context = rag_chatbot_owl(user_q, docs)
-
-            st.subheader("Chatbot Answer")
-            st.write(answer)
-
-            with st.expander("Show retrieved context from owl data"):
-                st.markdown(f"```text\n{used_context}\n```")
+                with st.expander("Show retrieved context from owl data"):
+                    st.markdown(f"```text\n{used_context}\n```")
