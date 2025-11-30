@@ -27,9 +27,6 @@ from sklearn.ensemble import (
 from sklearn.svm import SVR, SVC
 from sklearn.inspection import permutation_importance
 
-#  Lightweight RAG imports 
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 
 warnings.filterwarnings("ignore")
 
@@ -385,10 +382,10 @@ def prepare_model_data(df_new, df_old):
         "best_cls": best_cls,
         "yc_pred": yc_pred,
     }
+# -------------------------------------------------------------------
+# RAG Chatbot helpers – super light, pure Python keyword retrieval
+# -------------------------------------------------------------------
 
-# -------------------------------------------------------------------
-# RAG Chatbot helpers (TF-IDF retrieval, lightweight)
-# -------------------------------------------------------------------
 @st.cache_data
 def build_owl_documents(owl_df: pd.DataFrame):
     """
@@ -415,42 +412,43 @@ def build_owl_documents(owl_df: pd.DataFrame):
     return docs
 
 
-def build_tfidf_index(docs):
+def simple_retrieve_context(query: str, docs, top_k: int = 5) -> str:
     """
-    Build a TF-IDF index over the documents (light and safe for Cloud).
+    VERY LIGHT retrieval:
+    - lowercases the query
+    - counts how many query words appear in each document
+    - returns the top_k docs with highest match score
     """
-    vectorizer = TfidfVectorizer(stop_words="english")
-    doc_matrix = vectorizer.fit_transform(docs)
-    return vectorizer, doc_matrix
-
-
-def retrieve_context_owl(query: str, docs, top_k: int = 3) -> str:
-    """
-    Retrieve the top-k most similar documents using TF-IDF + cosine similarity.
-    This is the Retrieval part of RAG.
-    """
-    if not docs:
+    if not docs or not query.strip():
         return ""
 
-    vectorizer, doc_matrix = build_tfidf_index(docs)
-    query_vec = vectorizer.transform([query])
-    sims = cosine_similarity(query_vec, doc_matrix)[0]
-
-    top_idx = sims.argsort()[::-1][:top_k]
-    top_texts = [docs[i] for i in top_idx if sims[i] > 0]
-
-    if not top_texts:
+    q_words = [w for w in query.lower().split() if len(w) > 2]  # ignore tiny words
+    if not q_words:
         return ""
 
+    scored = []
+    for idx, text in enumerate(docs):
+        t = text.lower()
+        score = sum(1 for w in q_words if w in t)
+        if score > 0:
+            scored.append((score, idx))
+
+    if not scored:
+        return ""
+
+    scored.sort(reverse=True)  # highest score first
+    top_idx = [idx for score, idx in scored[:top_k]]
+    top_texts = [docs[i] for i in top_idx]
     return "\n\n".join(top_texts)
 
 
 def rag_chatbot_owl(query: str, docs):
     """
-    Simple generator: explain the retrieved context back to the user.
-    Still RAG: Retrieval + Answer derived from context.
+    Simple RAG-style chatbot:
+    - uses keyword-based retrieval to find relevant owl docs
+    - generates a natural-language answer summarizing that context
     """
-    context = retrieve_context_owl(query, docs, top_k=3)
+    context = simple_retrieve_context(query, docs, top_k=5)
 
     if not context:
         answer = (
@@ -467,7 +465,6 @@ def rag_chatbot_owl(query: str, docs):
         )
 
     return answer, context
-
 
 # -------------------------------------------------------------------
 # Sidebar – file upload
