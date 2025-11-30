@@ -14,8 +14,6 @@ from sklearn.metrics import (
     mean_squared_error,
     classification_report,
     confusion_matrix,
-    accuracy_score,
-    f1_score,
 )
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.tree import DecisionTreeRegressor
@@ -28,14 +26,14 @@ from sklearn.ensemble import (
 from sklearn.svm import SVR, SVC
 from sklearn.inspection import permutation_importance
 
-#  NEW RAG imports
-from sentence_transformers import SentenceTransformer, util
-from transformers import pipeline
+# ✅ Lightweight RAG imports (no transformers)
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 warnings.filterwarnings("ignore")
 
 # -------------------------------------------------------------------
-# Global residency thresholds (NO sliders anymore)
+# Global residency thresholds
 # -------------------------------------------------------------------
 SHORT_THR = 3.0   # 0–3 days -> Vagrant
 LONG_THR = 7.0    # 3–7 days -> Migrant ; 7+ -> Resident
@@ -47,7 +45,7 @@ st.set_page_config(page_title="BBO Owl Migration App", layout="wide")
 st.title("🦉 BBO Owl Migration App (EDA + FE + Modeling + XAI + RAG Chatbot)")
 
 # -------------------------------------------------------------------
-# Helper EDA functions (from your EDA notebook)
+# Helper EDA functions
 # -------------------------------------------------------------------
 def plot_detections_per_owl(df_det):
     st.subheader("1. Detections per Owl (motusTagID)")
@@ -79,7 +77,6 @@ def cap_outliers_iqr(df, col):
 def plot_before_after_boxplots(df_det):
     st.subheader("2. Outlier Capping (Before vs After)")
 
-    # numeric signal columns used in the notebook
     signal_cols = ["snr", "sig", "sigsd", "noise", "freq", "freqsd", "burstSlop", "slop"]
     cols_present = [c for c in signal_cols if c in df_det.columns]
 
@@ -87,7 +84,6 @@ def plot_before_after_boxplots(df_det):
         st.warning("No numeric signal columns found for outlier capping plots.")
         return
 
-    # To keep it readable, just show for snr and sig if they exist, else first two
     if "snr" in cols_present and "sig" in cols_present:
         cols_to_show = ["snr", "sig"]
     else:
@@ -126,7 +122,7 @@ def plot_signal_corr_heatmap(df_det):
 
 
 def eda_summary_text():
-    st.subheader("4. EDA & Feature Engineering Summary )")
+    st.subheader("4. EDA & Feature Engineering Summary (From Notebook)")
     st.markdown(
         """
 We started with a multi-sheet MOTUS dataset containing raw owl detections from 42 receiver stations.  
@@ -162,7 +158,6 @@ def load_csv_from_upload(uploaded):
 
 def prepare_model_data(df_new, df_old):
     """Replicates your modelling notebook steps, returns many useful objects."""
-
     df = df_new.copy()
 
     # 1) Standardize motusTagID column
@@ -194,7 +189,7 @@ def prepare_model_data(df_new, df_old):
 
         df["DATETIME"] = df["DATE"] + df["TIME_clean"]
 
-    # hour-of-day feature for later EDA
+    # hour-of-day feature
     df["hour"] = df["DATETIME"].dt.hour
 
     # 3) True stay duration (days) per owl
@@ -323,19 +318,22 @@ def prepare_model_data(df_new, df_old):
         X_imp, y_cls_enc, test_size=0.2, random_state=42, stratify=y_cls_enc
     )
 
-    # Candidate classifiers with small hyperparameter grids (like notebook)
     candidates = {
         "LogReg": {
             "estimator": Pipeline(
-                [("scaler", StandardScaler(with_mean=False)),
-                 ("clf", LogisticRegression(max_iter=3000, class_weight="balanced"))]
+                [
+                    ("scaler", StandardScaler(with_mean=False)),
+                    ("clf", LogisticRegression(max_iter=3000, class_weight="balanced")),
+                ]
             ),
             "params": {"clf__C": np.logspace(-2, 2, 12), "clf__solver": ["lbfgs", "liblinear"]},
         },
         "SVC": {
             "estimator": Pipeline(
-                [("scaler", StandardScaler(with_mean=False)),
-                 ("clf", SVC(class_weight="balanced"))]
+                [
+                    ("scaler", StandardScaler(with_mean=False)),
+                    ("clf", SVC(class_weight="balanced")),
+                ]
             ),
             "params": {
                 "clf__C": np.logspace(-2, 2, 12),
@@ -388,7 +386,7 @@ def prepare_model_data(df_new, df_old):
     yc_pred = best_cls.predict(Xc_test)
 
     return {
-        "df_det": df,  # detection-level with DATETIME + hour
+        "df_det": df,
         "owl_df": owl_df,
         "X_imp": X_imp,
         "X_train": X_train,
@@ -411,18 +409,9 @@ def prepare_model_data(df_new, df_old):
     }
 
 
-
-
 # -------------------------------------------------------------------
-# RAG Chatbot helpers (TF-IDF retrieval + FLAN-T5 generator)
+# RAG Chatbot helpers (TF-IDF retrieval, lightweight)
 # -------------------------------------------------------------------
-
-@st.cache_resource
-def load_rag_generator():
-    # small model so that it fits in Streamlit Cloud memory
-    return pipeline("text2text-generation", model="google/flan-t5-small")
-
-
 @st.cache_data
 def build_owl_documents(owl_df: pd.DataFrame):
     """
@@ -449,11 +438,9 @@ def build_owl_documents(owl_df: pd.DataFrame):
     return docs
 
 
-@st.cache_resource
 def build_tfidf_index(docs):
     """
-    Build a TF-IDF index over the documents.
-    Much lighter than SentenceTransformer embeddings.
+    Build a TF-IDF index over the documents (light and safe for Cloud).
     """
     vectorizer = TfidfVectorizer(stop_words="english")
     doc_matrix = vectorizer.fit_transform(docs)
@@ -463,6 +450,7 @@ def build_tfidf_index(docs):
 def retrieve_context_owl(query: str, docs, top_k: int = 3) -> str:
     """
     Retrieve the top-k most similar documents using TF-IDF + cosine similarity.
+    This is the Retrieval part of RAG.
     """
     if not docs:
         return ""
@@ -471,7 +459,6 @@ def retrieve_context_owl(query: str, docs, top_k: int = 3) -> str:
     query_vec = vectorizer.transform([query])
     sims = cosine_similarity(query_vec, doc_matrix)[0]
 
-    # indices of docs sorted by similarity (largest first)
     top_idx = sims.argsort()[::-1][:top_k]
     top_texts = [docs[i] for i in top_idx if sims[i] > 0]
 
@@ -481,41 +468,32 @@ def retrieve_context_owl(query: str, docs, top_k: int = 3) -> str:
     return "\n\n".join(top_texts)
 
 
-def query_llm_with_context(query: str, context: str) -> str:
-    """
-    Ask the FLAN-T5 model to answer using only the provided context.
-    """
-    generator = load_rag_generator()
-
-    if not context.strip():
-        return "I’m not sure – I couldn’t find information in the data for this question."
-
-    prompt = (
-        "You are helping biologists understand owl migration data. "
-        "Use ONLY the context below to answer the question. "
-        "If the answer is not in the context, say you are not sure.\n\n"
-        f"Context:\n{context}\n\n"
-        f"Question: {query}\n\n"
-        "Answer:"
-    )
-
-    output = generator(
-        prompt,
-        max_new_tokens=80,   # keep it small for Cloud
-        do_sample=False,
-        num_beams=2,
-    )
-    return output[0]["generated_text"].strip()
-
-
 def rag_chatbot_owl(query: str, docs):
+    """
+    Simple generator: explain the retrieved context back to the user.
+    Still RAG: Retrieval + Answer derived from context.
+    """
     context = retrieve_context_owl(query, docs, top_k=3)
-    answer = query_llm_with_context(query, context)
+
+    if not context:
+        answer = (
+            "I couldn't find relevant information in the owl residency data "
+            "for that question. Try asking about stay duration, detections, "
+            "or residency types (Vagrant / Migrant / Resident)."
+        )
+    else:
+        answer = (
+            "Here is what I found in the owl residency data related to your question:\n\n"
+            f"{context}\n\n"
+            "This answer is based only on the detected stay duration, number of detections, "
+            "and residency category for each owl."
+        )
+
     return answer, context
 
 
 # -------------------------------------------------------------------
-# Sidebar – file upload ONLY
+# Sidebar – file upload
 # -------------------------------------------------------------------
 st.sidebar.header("1) Upload data")
 
@@ -530,7 +508,7 @@ old_meta_file = st.sidebar.file_uploader(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.write(f"Residency thresholds (fixed):")
+st.sidebar.write("Residency thresholds (fixed):")
 st.sidebar.write(f"- 0–{SHORT_THR} days → **Vagrant**")
 st.sidebar.write(f"- {SHORT_THR}–{LONG_THR} days → **Migrant**")
 st.sidebar.write(f"- {LONG_THR}+ days → **Resident**")
@@ -539,7 +517,7 @@ st.sidebar.write(f"- {LONG_THR}+ days → **Resident**")
 # Main logic
 # -------------------------------------------------------------------
 if (combined_file is None) or (old_meta_file is None):
-    st.info(" Please upload **both** CSV files in the sidebar to see EDA, modelling, XAI, and the RAG chatbot.")
+    st.info("Please upload **both** CSV files in the sidebar to see EDA, modelling, XAI, and the RAG chatbot.")
 else:
     df_new = load_csv_from_upload(combined_file)
     df_old = load_csv_from_upload(old_meta_file)
@@ -662,7 +640,6 @@ else:
         plt.xticks(rotation=45, ha="right")
         st.pyplot(fig_top)
 
-        # Hour-of-day activity histogram
         st.subheader("6. What Time of Day Owls Are Most Active")
         if "hour" in df_det.columns:
             fig_hr, ax_hr = plt.subplots(figsize=(9, 4))
@@ -674,7 +651,6 @@ else:
         else:
             st.warning("`hour` column missing from detection-level data; cannot plot hourly activity.")
 
-        # Daily owl activity line plot
         st.subheader("7. Daily Owl Activity at the Station")
         if "DATETIME" in df_det.columns:
             df_det["date_only"] = df_det["DATETIME"].dt.date
@@ -758,18 +734,18 @@ This makes the model decisions more **transparent and actionable** for future re
         )
 
     # -------------------------------------------------------------------
-    # TAB 4: RAG Chatbot – question answering from owl data
+    # TAB 4: RAG Chatbot
     # -------------------------------------------------------------------
     with tab_rag:
         st.header("💬 RAG Chatbot – Ask Questions About Owl Residency")
 
         st.markdown(
             """
-This chatbot uses a **Retrieval-Augmented Generation (RAG)** pipeline:
+This chatbot uses a simple **Retrieval-Augmented Generation (RAG)** style approach:
 
-1. It converts each owl's stay information into a short text document.  
-2. For your question, it finds the most relevant documents using sentence embeddings.  
-3. It then asks a small language model (FLAN-T5) to answer based **only on that context**.
+1. It converts each owl's stay information into a short text *document*.  
+2. For your question, it finds the most similar documents using **TF-IDF + cosine similarity**.  
+3. It then returns an answer based **only on that retrieved context**.
             """
         )
 
@@ -787,15 +763,15 @@ This chatbot uses a **Retrieval-Augmented Generation (RAG)** pipeline:
                 if not user_q.strip():
                     st.warning("Please enter a question first.")
                 else:
-                    with st.spinner("Thinking..."):
-                        answer, used_context = rag_chatbot_owl(user_q, docs)
+                    answer, used_context = rag_chatbot_owl(user_q, docs)
 
                     st.markdown("### ✅ Answer")
                     st.write(answer)
 
                     st.markdown("### 🔎 Context used from the data")
                     st.write(
-                        "Below are the owl records the model used to answer your question "
+                        "Below are the owl records the chatbot used to answer your question "
                         "(this is the 'retrieved' part of RAG):"
                     )
                     st.code(used_context)
+
