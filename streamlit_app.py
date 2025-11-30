@@ -539,9 +539,13 @@ else:
     df_det = data_dict["df_det"]
     owl_df = data_dict["owl_df"]
 
-    # Tabs: EDA, Modelling, XAI, RAG
-    tab_eda, tab_model, tab_xai, tab_rag = st.tabs(
-        ["📊 EDA & Feature Engineering", "🤖 Modelling & Results", "🔍 XAI", "💬 RAG Chatbot"]
+   tab_eda, tab_model, tab_xai, tab_rag = st.tabs(
+    ["📊 EDA & Feature Engineering",
+     "🤖 Modelling & Results",
+     "🔍 XAI",
+     "💬 RAG Chatbot"]
+)
+
     )
 
     # -------------------------------------------------------------------
