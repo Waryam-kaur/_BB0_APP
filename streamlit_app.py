@@ -725,14 +725,15 @@ This makes the model decisions more **transparent and actionable** for future re
             """
         )
 
-       # -------------------------------------------------------------------
-    # TAB 4: RAG Chatbot
-    # -------------------------------------------------------------------
-    with tab_rag:
-        st.header("💬 RAG Chatbot – Ask Questions About Owl Residency")
 
-        st.markdown(
-            """
+# -------------------------------------------------------------------
+# TAB 4: RAG Chatbot
+# -------------------------------------------------------------------
+with tab_rag:
+    st.header("💬 RAG Chatbot – Ask Questions About Owl Residency")
+
+    st.markdown(
+        """
 This chatbot follows a **RAG-style pattern**:
 
 1. Each owl becomes a short **text document** with its stay duration, detections, and residency type.  
@@ -743,68 +744,78 @@ Try questions like:
 - *Which owls stayed the longest?*  
 - *What does a Resident owl look like in this data?*  
 - *How long did owl 80830 stay?*
-            """
+        """
+    )
+
+    # 🔹 Build docs_df if it doesn't exist or is empty
+    docs_df = st.session_state.get("docs_df", None)
+    if docs_df is None or docs_df.empty:
+        # use owl_df that we already created above in this script
+        if owl_df is None or owl_df.empty:
+            st.warning("Owl documents are not available because owl_df is empty.")
+            st.stop()
+        owl_subset = owl_df.head(500).copy()  # safety limit
+        docs_df = build_owl_documents_df(owl_subset)
+        st.session_state["docs_df"] = docs_df
+
+    if docs_df.empty:
+        st.warning("Owl documents could not be created from owl_df.")
+    else:
+        # ---- Chat history in session ----
+        if "rag_chat_history" not in st.session_state:
+            st.session_state["rag_chat_history"] = []
+
+        # Show previous messages
+        for msg in st.session_state["rag_chat_history"]:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        # Chat input at bottom
+        user_q = st.chat_input(
+            "Ask something about owl stay duration, residency, or detections..."
         )
 
-        docs_df = st.session_state.get("docs_df", None)
+        if user_q:
+            # Show user message
+            with st.chat_message("user"):
+                st.markdown(user_q)
+            st.session_state["rag_chat_history"].append(
+                {"role": "user", "content": user_q}
+            )
 
-        if docs_df is None or docs_df.empty:
-            st.warning("Owl documents are not available. Check that owl_df is not empty.")
-        else:
-            # ---- Chat history in session ----
-            if "rag_chat_history" not in st.session_state:
-                st.session_state["rag_chat_history"] = []
-
-            # Show previous messages
-            for msg in st.session_state["rag_chat_history"]:
-                with st.chat_message(msg["role"]):
-                    st.markdown(msg["content"])
-
-            # Chat input at bottom
-            user_q = st.chat_input("Ask something about owl stay duration, residency, or detections...")
-
-            if user_q:
-                # Show user message
-                with st.chat_message("user"):
-                    st.markdown(user_q)
-                st.session_state["rag_chat_history"].append(
-                    {"role": "user", "content": user_q}
+            # Generate answer safely
+            try:
+                answer = rag_answer(user_q, docs_df)
+            except Exception as e:
+                answer = (
+                    "The chatbot ran into an internal error while answering. "
+                    "This usually means the data is missing some expected column like "
+                    "`stay_duration_days` or `ResidencyType_true`."
                 )
+                st.error("Internal error in rag_answer:")
+                st.exception(e)
 
-                # Generate answer safely
+            # Show bot answer
+            with st.chat_message("assistant"):
+                st.markdown(answer)
+            st.session_state["rag_chat_history"].append(
+                {"role": "assistant", "content": answer}
+            )
+
+            # Optional: show retrieved docs
+            with st.expander("🔍 Show retrieved owls used in this answer"):
                 try:
-                    answer = rag_answer(user_q, docs_df)
+                    retrieved = simple_retrieval(user_q, docs_df, top_k=5)
+                    if retrieved.empty:
+                        st.write("No specific owls were strongly matched to this question.")
+                    else:
+                        for _, row in retrieved.iterrows():
+                            st.markdown(
+                                f"- **Owl {row['tag_id']}** – stayed about "
+                                f"{row['stay_days']:.1f} days, "
+                                f"{row['detections_count']} detections, "
+                                f"classified as **{row['residency_type']}**."
+                            )
                 except Exception as e:
-                    answer = (
-                        "The chatbot ran into an internal error while answering. "
-                        "This usually means the data is missing some expected column like "
-                        "`stay_days` or `ResidencyType_true`."
-                    )
-                    # Optional debug (can remove in final version)
-                    st.error("Internal error in rag_answer:")
+                    st.write("Error while showing retrieved owls.")
                     st.exception(e)
-
-                # Show bot answer
-                with st.chat_message("assistant"):
-                    st.markdown(answer)
-                st.session_state["rag_chat_history"].append(
-                    {"role": "assistant", "content": answer}
-                )
-
-                # Optional: show retrieved docs under an expander
-                with st.expander("🔍 Show retrieved owls used in this answer"):
-                    try:
-                        retrieved = simple_retrieval(user_q, docs_df, top_k=5)
-                        if retrieved.empty:
-                            st.write("No specific owls were strongly matched to this question.")
-                        else:
-                            for _, row in retrieved.iterrows():
-                                st.markdown(
-                                    f"- **Owl {row['tag_id']}** – stayed about "
-                                    f"{row['stay_days']:.1f} days, "
-                                    f"{row['detections_count']} detections, "
-                                    f"classified as **{row['residency_type']}**."
-                                )
-                    except Exception as e:
-                        st.write("Error while showing retrieved owls.")
-                        st.exception(e)
