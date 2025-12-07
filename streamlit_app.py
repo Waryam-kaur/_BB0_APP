@@ -716,13 +716,13 @@ This makes the model decisions more **transparent and actionable** for future re
         )
 
     # -------------------------------------------------------------------
-    # TAB 4: RAG Chatbot
-    # -------------------------------------------------------------------
-    with tab_rag:
-        st.header("💬 RAG Chatbot – Ask Questions About Owl Residency")
+# TAB 4: RAG Chatbot (SAFE + SIMPLE)
+# -------------------------------------------------------------------
+with tab_rag:
+    st.header("💬 RAG Chatbot – Ask Questions About Owl Residency")
 
-        st.markdown(
-            """
+    st.markdown(
+        """
 This chatbot follows a **RAG-style pattern**:
 
 1. Each owl becomes a short **text document** with its stay duration, detections, and residency type.  
@@ -733,66 +733,34 @@ Try questions like:
 - *Which owls stayed the longest?*  
 - *What does a Resident owl look like in this data?*  
 - *How long did owl 80830 stay?*
-            """
-        )
+        """
+    )
 
-        # Build docs_df if it doesn't exist or is empty
-        docs_df = st.session_state.get("docs_df", None)
-        if docs_df is None or docs_df.empty:
-            if owl_df is None or owl_df.empty:
-                st.warning("Owl documents are not available because owl_df is empty.")
-                st.stop()
-            owl_subset = owl_df.head(500).copy()  # safety limit
-            docs_df = build_owl_documents_df(owl_subset)
-            st.session_state["docs_df"] = docs_df
+    try:
+        # Build small docs dataframe
+        docs_df = build_owl_documents_df(owl_df.head(500))
 
         if docs_df.empty:
-            st.warning("Owl documents could not be created from owl_df.")
+            st.warning("Owl documents could not be created. Make sure modelling ran correctly.")
         else:
-            # Chat history
-            if "rag_chat_history" not in st.session_state:
-                st.session_state["rag_chat_history"] = []
-
-            for msg in st.session_state["rag_chat_history"]:
-                with st.chat_message(msg["role"]):
-                    st.markdown(msg["content"])
-
-            user_q = st.chat_input(
-                "Ask something about owl stay duration, residency, or detections..."
+            user_q = st.text_input(
+                "Ask something about owl stay duration, residency, or detections:",
+                placeholder="e.g., Which owls stayed the longest?",
             )
 
-            if user_q:
-                # user message
-                with st.chat_message("user"):
-                    st.markdown(user_q)
-                st.session_state["rag_chat_history"].append(
-                    {"role": "user", "content": user_q}
-                )
-
-                # answer
-                try:
+            if st.button("Ask the RAG chatbot"):
+                if not user_q.strip():
+                    st.warning("Please type a question first.")
+                else:
                     answer = rag_answer(user_q, docs_df)
-                except Exception as e:
-                    answer = (
-                        "The chatbot ran into an internal error while answering. "
-                        "This usually means the data is missing some expected column like "
-                        "`stay_duration_days` or `ResidencyType_true`."
-                    )
-                    st.error("Internal error in rag_answer:")
-                    st.exception(e)
 
-                with st.chat_message("assistant"):
-                    st.markdown(answer)
-                st.session_state["rag_chat_history"].append(
-                    {"role": "assistant", "content": answer}
-                )
+                    st.subheader("Chatbot Answer")
+                    st.write(answer)
 
-                # show retrieved docs
-                with st.expander("🔍 Show retrieved owls used in this answer"):
-                    try:
+                    with st.expander("🔍 Show retrieved owls used in this answer"):
                         retrieved = simple_retrieval(user_q, docs_df, top_k=5)
                         if retrieved.empty:
-                            st.write("No specific owls were strongly matched to this question.")
+                            st.write("No owls matched this question.")
                         else:
                             for _, row in retrieved.iterrows():
                                 st.markdown(
@@ -801,6 +769,7 @@ Try questions like:
                                     f"{row['detections_count']} detections, "
                                     f"classified as **{row['residency_type']}**."
                                 )
-                    except Exception as e:
-                        st.write("Error while showing retrieved owls.")
-                        st.exception(e)
+
+    except Exception as e:
+        st.error("⚠️ The RAG chatbot ran into an error.")
+        st.exception(e)
