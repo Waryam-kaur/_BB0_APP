@@ -704,21 +704,7 @@ def main():
             cls_imp["feature"].head(10)[::-1],
             cls_imp["importance"].head(10)[::-1],
         )
-        ax_cls_imp.set_title("Permutation Feature Importance (Classification)")
-        ax_cls_imp.set_xlabel("Mean Importance")
-        st.pyplot(fig_cls_imp)
 
-        st.markdown(
-            """
-These importance plots help BBO staff understand **which behavioural or tag-related
-features most strongly influence**:
-
-- How long an owl stays near the station (regression target), and  
-- Whether an owl behaves like a Vagrant, Migrant, or Resident (classification target).
-
-This makes the model decisions more **transparent and actionable** for future research.
-            """
-        )
 
     # -------------------------------------------------------------------
     # TAB 4: RAG Chatbot (SAFE + SIMPLE)
