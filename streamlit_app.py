@@ -699,15 +699,8 @@ def main():
         st.write("Top 10 most important features for **ResidencyType_true** classification:")
         st.write(cls_imp.head(10))
 
-        fig_cls_imp, ax_cls_imp = plt.subplots(figsize=(8, 4))
-        ax_cls_imp.barh(
-            cls_imp["feature"].head(10)[::-1],
-            cls_imp["importance"].head(10)[::-1],
-        )
-
-
-    # -------------------------------------------------------------------
-    # TAB 4: RAG Chatbot (SAFE + SIMPLE)
+        # -------------------------------------------------------------------
+    # TAB 4: RAG Chatbot (ULTRA SIMPLE – ALWAYS ANSWERS)
     # -------------------------------------------------------------------
     with tab_rag:
         st.header("💬 RAG Chatbot – Ask Questions About Owl Residency")
@@ -728,29 +721,44 @@ Try questions like:
         )
 
         try:
+            # Build small docs dataframe from the owl-level data
             docs_df = build_owl_documents_df(owl_df.head(500))
 
             if docs_df.empty:
-                st.warning("Owl documents could not be created. Make sure modelling ran correctly.")
+                st.warning(
+                    "Owl documents could not be created from `owl_df`. "
+                    "Please check that the modelling step ran correctly."
+                )
             else:
+                # User types question and presses Enter
                 user_q = st.text_input(
                     "Ask something about owl stay duration, residency, or detections:",
                     placeholder="e.g., Which owls stayed the longest?",
+                    key="rag_q",
                 )
 
-                if st.button("Ask the RAG chatbot"):
-                    if not user_q.strip():
-                        st.warning("Please type a question first.")
-                    else:
+                if user_q.strip():
+                    # Always try to answer – no button needed
+                    try:
                         answer = rag_answer(user_q, docs_df)
+                    except Exception as e:
+                        answer = (
+                            "The chatbot hit an internal error while answering. "
+                            "This usually means some expected column like "
+                            "`stay_duration_days` or `ResidencyType_true` is missing."
+                        )
+                        st.error("Internal error inside rag_answer:")
+                        st.exception(e)
 
-                        st.subheader("Chatbot Answer")
-                        st.write(answer)
+                    st.subheader("Chatbot Answer")
+                    st.write(answer)
 
-                        with st.expander("🔍 Show retrieved owls used in this answer"):
+                    # Show retrieved owls
+                    with st.expander("🔍 Show retrieved owls used in this answer"):
+                        try:
                             retrieved = simple_retrieval(user_q, docs_df, top_k=5)
                             if retrieved.empty:
-                                st.write("No owls matched this question.")
+                                st.write("No owls matched this question strongly.")
                             else:
                                 for _, row in retrieved.iterrows():
                                     st.markdown(
@@ -759,8 +767,12 @@ Try questions like:
                                         f"{row['detections_count']} detections, "
                                         f"classified as **{row['residency_type']}**."
                                     )
+                        except Exception as e:
+                            st.write("Error while showing retrieved owls.")
+                            st.exception(e)
+
         except Exception as e:
-            st.error("⚠️ The RAG chatbot ran into an error instead of answering.")
+            st.error("⚠️ The RAG chatbot block itself ran into an error.")
             st.exception(e)
 
 
