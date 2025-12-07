@@ -716,9 +716,9 @@ This makes the model decisions more **transparent and actionable** for future re
         )
 
     # -------------------------------------------------------------------
-# TAB 4: RAG Chatbot (SAFE + SIMPLE)
-# -------------------------------------------------------------------
-with tab_rag:
+    # TAB 4: RAG Chatbot (SAFE + SIMPLE)
+    # -------------------------------------------------------------------
+    with tab_rag:
     st.header("💬 RAG Chatbot – Ask Questions About Owl Residency")
 
     st.markdown(
