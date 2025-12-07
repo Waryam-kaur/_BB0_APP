@@ -251,7 +251,8 @@ def prepare_model_data(df_new, df_old):
 
     # 6) Merge features + stay duration + metadata
     owl_df = owl_features.merge(stay_true, on="motusTagID", how="left")
-    owl_df = owl_df.merge(meta_one, on "motusTagID", how="left", suffixes=("", "_meta"))
+    owl_df = owl_df.merge(meta_one, on="motusTagID", how="left", suffixes=("", "_meta"))
+
 
     # 7) Residency type from thresholds
     bins = [0, SHORT_THR, LONG_THR, np.inf]
