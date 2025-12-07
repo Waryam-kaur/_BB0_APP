@@ -8,8 +8,7 @@ import seaborn as sns
 import warnings
 
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.pipeline import Pipeline, make_pipeline
+from sklearn.preprocessing import LabelEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import (
     r2_score,
@@ -18,19 +17,16 @@ from sklearn.metrics import (
     confusion_matrix,
     f1_score,
 )
-from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.tree import DecisionTreeRegressor
 from sklearn.ensemble import (
-    RandomForestRegressor,
     GradientBoostingRegressor,
     RandomForestClassifier,
 )
-from sklearn.svm import SVR
 from sklearn.inspection import permutation_importance
 
 warnings.filterwarnings("ignore")
 
-# Global residency thresholds (NO sliders anymore)
+# -------------------------------------------------------------------
+# Global residency thresholds
 # -------------------------------------------------------------------
 SHORT_THR = 3.0   # 0–3 days -> Vagrant
 LONG_THR = 7.0    # 3–7 days -> Migrant ; 7+ -> Resident
@@ -42,7 +38,7 @@ st.set_page_config(page_title="BBO Owl Migration App", layout="wide")
 st.title("🦉 BBO Owl Migration App ")
 
 # -------------------------------------------------------------------
-# Helper EDA functions (from your EDA notebook)
+# Helper EDA functions
 # -------------------------------------------------------------------
 def plot_detections_per_owl(df_det):
     st.subheader("1. Detections per Owl (motusTagID)")
@@ -74,7 +70,6 @@ def cap_outliers_iqr(df, col):
 def plot_before_after_boxplots(df_det):
     st.subheader("2. Outlier Capping (Before vs After)")
 
-    # numeric signal columns used in the notebook
     signal_cols = ["snr", "sig", "sigsd", "noise", "freq", "freqsd", "burstSlop", "slop"]
     cols_present = [c for c in signal_cols if c in df_det.columns]
 
@@ -82,7 +77,6 @@ def plot_before_after_boxplots(df_det):
         st.warning("No numeric signal columns found for outlier capping plots.")
         return
 
-    # To keep it readable, just show for snr and sig if they exist, else first two
     if "snr" in cols_present and "sig" in cols_present:
         cols_to_show = ["snr", "sig"]
     else:
@@ -156,7 +150,6 @@ def load_csv_from_upload(uploaded):
 
 # -------------------------------------------------------------------
 # Main Modelling / FE helper
-# simplified: train ONLY the best models directly
 # -------------------------------------------------------------------
 @st.cache_data(show_spinner=True)
 def prepare_model_data(df_new, df_old):
@@ -193,7 +186,7 @@ def prepare_model_data(df_new, df_old):
 
         df["DATETIME"] = df["DATE"] + df["TIME_clean"]
 
-    # hour-of-day feature for later EDA
+    # hour-of-day feature
     df["hour"] = df["DATETIME"].dt.hour
 
     # 3) True stay duration (days) per owl
@@ -258,7 +251,7 @@ def prepare_model_data(df_new, df_old):
 
     # 6) Merge features + stay duration + metadata
     owl_df = owl_features.merge(stay_true, on="motusTagID", how="left")
-    owl_df = owl_df.merge(meta_one, on="motusTagID", how="left", suffixes=("", "_meta"))
+    owl_df = owl_df.merge(meta_one, on "motusTagID", how="left", suffixes=("", "_meta"))
 
     # 7) Residency type from thresholds
     bins = [0, SHORT_THR, LONG_THR, np.inf]
@@ -282,7 +275,7 @@ def prepare_model_data(df_new, df_old):
         X_imp, y_reg, test_size=0.2, random_state=42
     )
 
-    # 9) Regression – train ONLY the best model (GradientBoosting)
+    # 9) Regression – GradientBoosting
     best_reg_name = "GradientBoosting"
     best_reg = GradientBoostingRegressor(
         n_estimators=300, learning_rate=0.05, max_depth=4, random_state=42
@@ -307,7 +300,6 @@ def prepare_model_data(df_new, df_old):
         X_imp, y_cls_enc, test_size=0.2, random_state=42, stratify=y_cls_enc
     )
 
-    # classification – train ONLY one RandomForest (no CV)
     best_cls_name = "RandomForestClassifier"
     best_cls = RandomForestClassifier(
         n_estimators=200,
@@ -324,7 +316,7 @@ def prepare_model_data(df_new, df_old):
     )
 
     return {
-        "df_det": df,  # detection-level with DATETIME + hour
+        "df_det": df,
         "owl_df": owl_df,
         "X_imp": X_imp,
         "X_train": X_train,
@@ -348,7 +340,7 @@ def prepare_model_data(df_new, df_old):
 
 
 # -------------------------------------------------------------------
-# RAG Chatbot helpers – ultra simple
+# RAG Chatbot helpers
 # -------------------------------------------------------------------
 def build_owl_documents_df(owl_df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -529,7 +521,7 @@ else:
     df_det = data_dict["df_det"]
     owl_df = data_dict["owl_df"]
 
-    # Tabs: EDA, Modelling, XAI, RAG
+    # Create tabs
     tab_eda, tab_model, tab_xai, tab_rag = st.tabs(
         ["📊 EDA & Feature Engineering", "🤖 Modelling & Results", "🔍 XAI", "💬 RAG Chatbot"]
     )
@@ -566,7 +558,6 @@ else:
         best_reg_name = data_dict["best_reg_name"]
         st.markdown(f"**Best regression model:** `{best_reg_name}`")
 
-        # Scatter: true vs predicted (test)
         y_test = data_dict["y_test"]
         best_pred_test = data_dict["best_reg_pred_test"]
 
@@ -619,7 +610,7 @@ else:
         ax_cm.set_title(f"Confusion Matrix — {best_cls_name}")
         st.pyplot(fig_cm)
 
-        # Extra modelling visualizations (from your notebook)
+        # Extra modelling visualizations
         st.subheader("5. Top 15 Owls by Number of Days Stayed")
         top15 = owl_df.sort_values("stay_duration_days", ascending=False).head(15)
         fig_top, ax_top = plt.subplots(figsize=(10, 4))
@@ -630,7 +621,6 @@ else:
         plt.xticks(rotation=45, ha="right")
         st.pyplot(fig_top)
 
-        # Hour-of-day activity histogram
         st.subheader("6. What Time of Day Owls Are Most Active")
         if "hour" in df_det.columns:
             fig_hr, ax_hr = plt.subplots(figsize=(9, 4))
@@ -642,7 +632,6 @@ else:
         else:
             st.warning("`hour` column missing from detection-level data; cannot plot hourly activity.")
 
-        # Daily owl activity line plot
         st.subheader("7. Daily Owl Activity at the Station")
         if "DATETIME" in df_det.columns:
             df_det["date_only"] = df_det["DATETIME"].dt.date
@@ -725,15 +714,14 @@ This makes the model decisions more **transparent and actionable** for future re
             """
         )
 
+    # -------------------------------------------------------------------
+    # TAB 4: RAG Chatbot
+    # -------------------------------------------------------------------
+    with tab_rag:
+        st.header("💬 RAG Chatbot – Ask Questions About Owl Residency")
 
-# -------------------------------------------------------------------
-# TAB 4: RAG Chatbot
-# -------------------------------------------------------------------
-with tab_rag:
-    st.header("💬 RAG Chatbot – Ask Questions About Owl Residency")
-
-    st.markdown(
-        """
+        st.markdown(
+            """
 This chatbot follows a **RAG-style pattern**:
 
 1. Each owl becomes a short **text document** with its stay duration, detections, and residency type.  
@@ -744,78 +732,74 @@ Try questions like:
 - *Which owls stayed the longest?*  
 - *What does a Resident owl look like in this data?*  
 - *How long did owl 80830 stay?*
-        """
-    )
-
-    # 🔹 Build docs_df if it doesn't exist or is empty
-    docs_df = st.session_state.get("docs_df", None)
-    if docs_df is None or docs_df.empty:
-        # use owl_df that we already created above in this script
-        if owl_df is None or owl_df.empty:
-            st.warning("Owl documents are not available because owl_df is empty.")
-            st.stop()
-        owl_subset = owl_df.head(500).copy()  # safety limit
-        docs_df = build_owl_documents_df(owl_subset)
-        st.session_state["docs_df"] = docs_df
-
-    if docs_df.empty:
-        st.warning("Owl documents could not be created from owl_df.")
-    else:
-        # ---- Chat history in session ----
-        if "rag_chat_history" not in st.session_state:
-            st.session_state["rag_chat_history"] = []
-
-        # Show previous messages
-        for msg in st.session_state["rag_chat_history"]:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-
-        # Chat input at bottom
-        user_q = st.chat_input(
-            "Ask something about owl stay duration, residency, or detections..."
+            """
         )
 
-        if user_q:
-            # Show user message
-            with st.chat_message("user"):
-                st.markdown(user_q)
-            st.session_state["rag_chat_history"].append(
-                {"role": "user", "content": user_q}
+        # Build docs_df if it doesn't exist or is empty
+        docs_df = st.session_state.get("docs_df", None)
+        if docs_df is None or docs_df.empty:
+            if owl_df is None or owl_df.empty:
+                st.warning("Owl documents are not available because owl_df is empty.")
+                st.stop()
+            owl_subset = owl_df.head(500).copy()  # safety limit
+            docs_df = build_owl_documents_df(owl_subset)
+            st.session_state["docs_df"] = docs_df
+
+        if docs_df.empty:
+            st.warning("Owl documents could not be created from owl_df.")
+        else:
+            # Chat history
+            if "rag_chat_history" not in st.session_state:
+                st.session_state["rag_chat_history"] = []
+
+            for msg in st.session_state["rag_chat_history"]:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+
+            user_q = st.chat_input(
+                "Ask something about owl stay duration, residency, or detections..."
             )
 
-            # Generate answer safely
-            try:
-                answer = rag_answer(user_q, docs_df)
-            except Exception as e:
-                answer = (
-                    "The chatbot ran into an internal error while answering. "
-                    "This usually means the data is missing some expected column like "
-                    "`stay_duration_days` or `ResidencyType_true`."
+            if user_q:
+                # user message
+                with st.chat_message("user"):
+                    st.markdown(user_q)
+                st.session_state["rag_chat_history"].append(
+                    {"role": "user", "content": user_q}
                 )
-                st.error("Internal error in rag_answer:")
-                st.exception(e)
 
-            # Show bot answer
-            with st.chat_message("assistant"):
-                st.markdown(answer)
-            st.session_state["rag_chat_history"].append(
-                {"role": "assistant", "content": answer}
-            )
-
-            # Optional: show retrieved docs
-            with st.expander("🔍 Show retrieved owls used in this answer"):
+                # answer
                 try:
-                    retrieved = simple_retrieval(user_q, docs_df, top_k=5)
-                    if retrieved.empty:
-                        st.write("No specific owls were strongly matched to this question.")
-                    else:
-                        for _, row in retrieved.iterrows():
-                            st.markdown(
-                                f"- **Owl {row['tag_id']}** – stayed about "
-                                f"{row['stay_days']:.1f} days, "
-                                f"{row['detections_count']} detections, "
-                                f"classified as **{row['residency_type']}**."
-                            )
+                    answer = rag_answer(user_q, docs_df)
                 except Exception as e:
-                    st.write("Error while showing retrieved owls.")
+                    answer = (
+                        "The chatbot ran into an internal error while answering. "
+                        "This usually means the data is missing some expected column like "
+                        "`stay_duration_days` or `ResidencyType_true`."
+                    )
+                    st.error("Internal error in rag_answer:")
                     st.exception(e)
+
+                with st.chat_message("assistant"):
+                    st.markdown(answer)
+                st.session_state["rag_chat_history"].append(
+                    {"role": "assistant", "content": answer}
+                )
+
+                # show retrieved docs
+                with st.expander("🔍 Show retrieved owls used in this answer"):
+                    try:
+                        retrieved = simple_retrieval(user_q, docs_df, top_k=5)
+                        if retrieved.empty:
+                            st.write("No specific owls were strongly matched to this question.")
+                        else:
+                            for _, row in retrieved.iterrows():
+                                st.markdown(
+                                    f"- **Owl {row['tag_id']}** – stayed about "
+                                    f"{row['stay_days']:.1f} days, "
+                                    f"{row['detections_count']} detections, "
+                                    f"classified as **{row['residency_type']}**."
+                                )
+                    except Exception as e:
+                        st.write("Error while showing retrieved owls.")
+                        st.exception(e)
