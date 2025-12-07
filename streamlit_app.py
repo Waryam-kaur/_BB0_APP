@@ -37,6 +37,7 @@ LONG_THR = 7.0    # 3–7 days -> Migrant ; 7+ -> Resident
 st.set_page_config(page_title="BBO Owl Migration App", layout="wide")
 st.title("🦉 BBO Owl Migration App ")
 
+
 # -------------------------------------------------------------------
 # Helper EDA functions
 # -------------------------------------------------------------------
@@ -47,7 +48,6 @@ def plot_detections_per_owl(df_det):
         return
 
     counts = df_det["motusTagID"].value_counts().sort_values(ascending=False)
-
     fig, ax = plt.subplots(figsize=(12, 4))
     counts.plot(kind="bar", ax=ax)
     ax.set_title("Detections per Owl (motusTagID)")
@@ -98,7 +98,6 @@ def plot_before_after_boxplots(df_det):
 
 def plot_signal_corr_heatmap(df_det):
     st.subheader("3. Correlation Heatmap (Numeric Signal Features)")
-
     signal_cols = ["snr", "sig", "sigsd", "noise", "freq", "freqsd", "burstSlop", "slop"]
     cols_present = [c for c in signal_cols if c in df_det.columns]
 
@@ -107,7 +106,6 @@ def plot_signal_corr_heatmap(df_det):
         return
 
     corr = df_det[cols_present].corr()
-
     fig, ax = plt.subplots(figsize=(8, 6))
     sns.heatmap(corr, annot=True, cmap="coolwarm", ax=ax)
     ax.set_title("Correlation Heatmap (Numeric Signal Features)")
@@ -137,6 +135,7 @@ new MOTUS detections with the old metadata file (age, sex, species, measurements
 This produced a fully enriched dataset that was ready for modelling.
         """
     )
+
 
 # -------------------------------------------------------------------
 # Data loading helper
@@ -186,7 +185,7 @@ def prepare_model_data(df_new, df_old):
 
         df["DATETIME"] = df["DATE"] + df["TIME_clean"]
 
-    # hour-of-day feature
+    # hour-of-day feature for later EDA
     df["hour"] = df["DATETIME"].dt.hour
 
     # 3) True stay duration (days) per owl
@@ -253,7 +252,6 @@ def prepare_model_data(df_new, df_old):
     owl_df = owl_features.merge(stay_true, on="motusTagID", how="left")
     owl_df = owl_df.merge(meta_one, on="motusTagID", how="left", suffixes=("", "_meta"))
 
-
     # 7) Residency type from thresholds
     bins = [0, SHORT_THR, LONG_THR, np.inf]
     labels = ["Vagrant", "Migrant", "Resident"]
@@ -276,7 +274,7 @@ def prepare_model_data(df_new, df_old):
         X_imp, y_reg, test_size=0.2, random_state=42
     )
 
-    # 9) Regression – GradientBoosting
+    # 9) Regression – train ONLY the best model (GradientBoosting)
     best_reg_name = "GradientBoosting"
     best_reg = GradientBoostingRegressor(
         n_estimators=300, learning_rate=0.05, max_depth=4, random_state=42
@@ -301,6 +299,7 @@ def prepare_model_data(df_new, df_old):
         X_imp, y_cls_enc, test_size=0.2, random_state=42, stratify=y_cls_enc
     )
 
+    # classification – train ONLY one RandomForest (no CV)
     best_cls_name = "RandomForestClassifier"
     best_cls = RandomForestClassifier(
         n_estimators=200,
@@ -317,7 +316,7 @@ def prepare_model_data(df_new, df_old):
     )
 
     return {
-        "df_det": df,
+        "df_det": df,  # detection-level with DATETIME + hour
         "owl_df": owl_df,
         "X_imp": X_imp,
         "X_train": X_train,
@@ -341,7 +340,7 @@ def prepare_model_data(df_new, df_old):
 
 
 # -------------------------------------------------------------------
-# RAG Chatbot helpers
+# RAG Chatbot helpers – ultra simple
 # -------------------------------------------------------------------
 def build_owl_documents_df(owl_df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -476,32 +475,35 @@ def rag_answer(question: str, docs_df: pd.DataFrame) -> str:
 
 
 # -------------------------------------------------------------------
-# Sidebar – file upload ONLY
+# MAIN APP
 # -------------------------------------------------------------------
-st.sidebar.header("1) Upload data")
+def main():
+    # Sidebar – file upload ONLY
+    st.sidebar.header("1) Upload data")
+    st.sidebar.markdown("**Upload your final combined detection dataset and old metadata CSVs.**")
 
-st.sidebar.markdown("**Upload your final combined detection dataset and old metadata CSVs.**")
+    combined_file = st.sidebar.file_uploader(
+        "FINAL combined dataset (combined_sawwhet_owls.csv)", type=["csv"], key="combined"
+    )
 
-combined_file = st.sidebar.file_uploader(
-    "FINAL combined dataset (combined_sawwhet_owls.csv)", type=["csv"], key="combined"
-)
+    old_meta_file = st.sidebar.file_uploader(
+        "OLD metadata (clean_df_selected.csv)", type=["csv"], key="oldmeta"
+    )
 
-old_meta_file = st.sidebar.file_uploader(
-    "OLD metadata (clean_df_selected.csv)", type=["csv"], key="oldmeta"
-)
+    st.sidebar.markdown("---")
+    st.sidebar.write("Residency thresholds (fixed):")
+    st.sidebar.write(f"- 0–{SHORT_THR} days → **Vagrant**")
+    st.sidebar.write(f"- {SHORT_THR}–{LONG_THR} days → **Migrant**")
+    st.sidebar.write(f"- {LONG_THR}+ days → **Resident**")
 
-st.sidebar.markdown("---")
-st.sidebar.write("Residency thresholds (fixed):")
-st.sidebar.write(f"- 0–{SHORT_THR} days → **Vagrant**")
-st.sidebar.write(f"- {SHORT_THR}–{LONG_THR} days → **Migrant**")
-st.sidebar.write(f"- {LONG_THR}+ days → **Resident**")
+    # If files not uploaded yet
+    if (combined_file is None) or (old_meta_file is None):
+        st.info(" Please upload **both** CSV files in the sidebar to see EDA, modelling, XAI, and the RAG chatbot.")
+        return
 
-# -------------------------------------------------------------------
-# Main logic
-# -------------------------------------------------------------------
-if (combined_file is None) or (old_meta_file is None):
-    st.info(" Please upload **both** CSV files in the sidebar to see EDA, modelling, XAI, and the RAG chatbot.")
-else:
+    # -------------------------------------------------------------------
+    # When both files are uploaded
+    # -------------------------------------------------------------------
     df_new = load_csv_from_upload(combined_file)
     df_old = load_csv_from_upload(old_meta_file)
 
@@ -522,7 +524,7 @@ else:
     df_det = data_dict["df_det"]
     owl_df = data_dict["owl_df"]
 
-    # Create tabs
+    # Tabs: EDA, Modelling, XAI, RAG
     tab_eda, tab_model, tab_xai, tab_rag = st.tabs(
         ["📊 EDA & Feature Engineering", "🤖 Modelling & Results", "🔍 XAI", "💬 RAG Chatbot"]
     )
@@ -559,6 +561,7 @@ else:
         best_reg_name = data_dict["best_reg_name"]
         st.markdown(f"**Best regression model:** `{best_reg_name}`")
 
+        # Scatter: true vs predicted (test)
         y_test = data_dict["y_test"]
         best_pred_test = data_dict["best_reg_pred_test"]
 
@@ -611,7 +614,7 @@ else:
         ax_cm.set_title(f"Confusion Matrix — {best_cls_name}")
         st.pyplot(fig_cm)
 
-        # Extra modelling visualizations
+        # Extra modelling visualizations (from your notebook)
         st.subheader("5. Top 15 Owls by Number of Days Stayed")
         top15 = owl_df.sort_values("stay_duration_days", ascending=False).head(15)
         fig_top, ax_top = plt.subplots(figsize=(10, 4))
@@ -622,6 +625,7 @@ else:
         plt.xticks(rotation=45, ha="right")
         st.pyplot(fig_top)
 
+        # Hour-of-day activity histogram
         st.subheader("6. What Time of Day Owls Are Most Active")
         if "hour" in df_det.columns:
             fig_hr, ax_hr = plt.subplots(figsize=(9, 4))
@@ -633,6 +637,7 @@ else:
         else:
             st.warning("`hour` column missing from detection-level data; cannot plot hourly activity.")
 
+        # Daily owl activity line plot
         st.subheader("7. Daily Owl Activity at the Station")
         if "DATETIME" in df_det.columns:
             df_det["date_only"] = df_det["DATETIME"].dt.date
@@ -719,10 +724,10 @@ This makes the model decisions more **transparent and actionable** for future re
     # TAB 4: RAG Chatbot (SAFE + SIMPLE)
     # -------------------------------------------------------------------
     with tab_rag:
-    st.header("💬 RAG Chatbot – Ask Questions About Owl Residency")
+        st.header("💬 RAG Chatbot – Ask Questions About Owl Residency")
 
-    st.markdown(
-        """
+        st.markdown(
+            """
 This chatbot follows a **RAG-style pattern**:
 
 1. Each owl becomes a short **text document** with its stay duration, detections, and residency type.  
@@ -733,43 +738,48 @@ Try questions like:
 - *Which owls stayed the longest?*  
 - *What does a Resident owl look like in this data?*  
 - *How long did owl 80830 stay?*
-        """
-    )
+            """
+        )
 
-    try:
-        # Build small docs dataframe
-        docs_df = build_owl_documents_df(owl_df.head(500))
+        try:
+            docs_df = build_owl_documents_df(owl_df.head(500))
 
-        if docs_df.empty:
-            st.warning("Owl documents could not be created. Make sure modelling ran correctly.")
-        else:
-            user_q = st.text_input(
-                "Ask something about owl stay duration, residency, or detections:",
-                placeholder="e.g., Which owls stayed the longest?",
-            )
+            if docs_df.empty:
+                st.warning("Owl documents could not be created. Make sure modelling ran correctly.")
+            else:
+                user_q = st.text_input(
+                    "Ask something about owl stay duration, residency, or detections:",
+                    placeholder="e.g., Which owls stayed the longest?",
+                )
 
-            if st.button("Ask the RAG chatbot"):
-                if not user_q.strip():
-                    st.warning("Please type a question first.")
-                else:
-                    answer = rag_answer(user_q, docs_df)
+                if st.button("Ask the RAG chatbot"):
+                    if not user_q.strip():
+                        st.warning("Please type a question first.")
+                    else:
+                        answer = rag_answer(user_q, docs_df)
 
-                    st.subheader("Chatbot Answer")
-                    st.write(answer)
+                        st.subheader("Chatbot Answer")
+                        st.write(answer)
 
-                    with st.expander("🔍 Show retrieved owls used in this answer"):
-                        retrieved = simple_retrieval(user_q, docs_df, top_k=5)
-                        if retrieved.empty:
-                            st.write("No owls matched this question.")
-                        else:
-                            for _, row in retrieved.iterrows():
-                                st.markdown(
-                                    f"- **Owl {row['tag_id']}** – stayed about "
-                                    f"{row['stay_days']:.1f} days, "
-                                    f"{row['detections_count']} detections, "
-                                    f"classified as **{row['residency_type']}**."
-                                )
+                        with st.expander("🔍 Show retrieved owls used in this answer"):
+                            retrieved = simple_retrieval(user_q, docs_df, top_k=5)
+                            if retrieved.empty:
+                                st.write("No owls matched this question.")
+                            else:
+                                for _, row in retrieved.iterrows():
+                                    st.markdown(
+                                        f"- **Owl {row['tag_id']}** – stayed about "
+                                        f"{row['stay_days']:.1f} days, "
+                                        f"{row['detections_count']} detections, "
+                                        f"classified as **{row['residency_type']}**."
+                                    )
+        except Exception as e:
+            st.error("⚠️ The RAG chatbot ran into an error instead of answering.")
+            st.exception(e)
 
-    except Exception as e:
-        st.error("⚠️ The RAG chatbot ran into an error.")
-        st.exception(e)
+
+# -------------------------------------------------------------------
+# RUN APP
+# -------------------------------------------------------------------
+if __name__ == "__main__":
+    main()
